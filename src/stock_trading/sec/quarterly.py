@@ -13,6 +13,7 @@ from stock_trading.core import (
     InsiderTransactionPayload,
     RawRecord,
     Source,
+    as_utc,
     deterministic_event_id,
 )
 
@@ -143,7 +144,7 @@ class QuarterlyArchiveParser:
         if archive.source is not Source.SEC_QUARTERLY:
             raise ValueError("quarterly archive RawRecord must use Source.SEC_QUARTERLY")
 
-        ingested_at = ingested_at.astimezone(timezone.utc)
+        ingested_at = as_utc(ingested_at)
         events: list[Event] = []
         for transaction in self.parse(
             archive.content if isinstance(archive.content, bytes) else archive.content.encode("utf-8")

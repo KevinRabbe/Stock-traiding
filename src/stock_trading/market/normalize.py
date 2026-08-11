@@ -4,25 +4,28 @@ from decimal import Decimal
 
 from stock_trading.core import RawRecord, Source
 
-from .models import MarketBar, SecurityMapping
+from .models import MarketBar, TiingoMetadata
 from .tiingo import normalize_tiingo_ticker
 
 
 class TiingoNormalizer:
-    def parse_metadata(self, raw: RawRecord, *, company_id: str) -> SecurityMapping:
+    def parse_metadata(self, raw: RawRecord) -> TiingoMetadata:
         self._require_tiingo_json(raw)
         payload = json.loads(self._text(raw))
         ticker = normalize_tiingo_ticker(str(payload["ticker"]))
+        name = str(payload.get("name") or "").strip()
         start_date = payload.get("startDate")
+        if not name:
+            raise ValueError("Tiingo metadata has no company name")
         if not start_date:
             raise ValueError("Tiingo metadata has no startDate")
         end_date = payload.get("endDate")
-        return SecurityMapping(
-            company_id=company_id,
+        return TiingoMetadata(
             ticker=ticker,
+            name=name,
             exchange_code=payload.get("exchangeCode") or None,
-            valid_from=date.fromisoformat(str(start_date)[:10]),
-            valid_to=date.fromisoformat(str(end_date)[:10]) if end_date else None,
+            start_date=date.fromisoformat(str(start_date)[:10]),
+            end_date=date.fromisoformat(str(end_date)[:10]) if end_date else None,
         )
 
     def parse_prices(

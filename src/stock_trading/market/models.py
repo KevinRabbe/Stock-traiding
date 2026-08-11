@@ -34,6 +34,18 @@ class MarketBar(BaseModel):
         return self
 
 
+class TiingoMetadata(BaseModel):
+    """Descriptive market-source metadata before canonical entity resolution."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    ticker: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    exchange_code: str | None = None
+    start_date: date
+    end_date: date | None = None
+
+
 class SecurityMapping(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 

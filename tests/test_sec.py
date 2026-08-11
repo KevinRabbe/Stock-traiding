@@ -6,6 +6,7 @@ from decimal import Decimal
 import pytest
 
 from stock_trading.core import RawRecord, Source, TradeDirection, content_sha256
+from stock_trading.entities import company_id_from_sec_cik
 from stock_trading.sec import Form4XmlParser, QuarterlyArchiveParser, SecClient
 
 
@@ -68,7 +69,7 @@ def test_quarterly_parser_filters_to_form4_and_builds_safe_event() -> None:
     assert len(events) == 1
 
     event = events[0]
-    assert event.company_id == "sec_cik_0000012345"
+    assert event.company_id == company_id_from_sec_cik("12345")
     assert event.actor_id == "sec_owner_cik_0000054321"
     assert event.first_tradable_time is None
     assert event.payload.direction is TradeDirection.BUY
@@ -147,6 +148,7 @@ def test_live_form4_xml_uses_exact_acceptance_time() -> None:
 
     assert len(events) == 1
     event = events[0]
+    assert event.company_id == company_id_from_sec_cik("12345")
     assert event.public_time == accepted
     assert event.payload.direction is TradeDirection.BUY
     assert event.payload.intent_class == "DISCRETIONARY_BUY"

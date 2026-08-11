@@ -16,6 +16,7 @@ from stock_trading.core import (
     as_utc,
     deterministic_event_id,
 )
+from stock_trading.entities import company_id_from_sec_cik
 
 from .codes import classify_direction, classify_intent
 
@@ -190,7 +191,7 @@ class QuarterlyArchiveParser:
                 Event(
                     event_id=event_id,
                     event_type=EventType.INSIDER_TRANSACTION,
-                    company_id=f"sec_cik_{transaction.issuer_cik}",
+                    company_id=company_id_from_sec_cik(transaction.issuer_cik),
                     actor_id=(f"sec_owner_cik_{owner.cik}" if owner else None),
                     event_time=event_time,
                     public_time=public_time,
@@ -213,9 +214,6 @@ class QuarterlyArchiveParser:
                             transaction.transaction_code,
                             transaction.acquired_disposed,
                         ),
-                        # AFF10B5ONE is a filing-level checkbox. We preserve it here
-                        # but do not infer that every transaction in a joint filing
-                        # was individually executed under a 10b5-1 plan.
                         is_10b5_1=transaction.filing_has_10b5_1,
                     ),
                     semantic=None,

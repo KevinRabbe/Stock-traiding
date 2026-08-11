@@ -78,6 +78,21 @@ def test_quarterly_parser_filters_to_form4_and_builds_safe_event() -> None:
     assert event.public_time.date().isoformat() == "2026-08-11"  # UTC conversion of ET day-end
 
 
+def test_quarterly_parser_rejects_naive_ingestion_timestamp() -> None:
+    archive = _raw(
+        Source.SEC_QUARTERLY,
+        "2026Q3",
+        _quarterly_zip(),
+        "application/zip",
+    )
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        QuarterlyArchiveParser().to_events(
+            archive,
+            ingested_at=datetime(2026, 8, 11, 15, 30),
+        )
+
+
 def test_live_form4_xml_uses_exact_acceptance_time() -> None:
     xml = """<?xml version="1.0"?>
 <ownershipDocument>

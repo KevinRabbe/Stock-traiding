@@ -12,6 +12,7 @@ from stock_trading.core import (
     as_utc,
     deterministic_event_id,
 )
+from stock_trading.entities import company_id_from_sec_cik
 
 from .codes import classify_direction, classify_intent
 
@@ -110,7 +111,7 @@ class Form4XmlParser:
                         EventType.INSIDER_TRANSACTION,
                     ),
                     event_type=EventType.INSIDER_TRANSACTION,
-                    company_id=f"sec_cik_{issuer_cik}",
+                    company_id=company_id_from_sec_cik(issuer_cik),
                     actor_id=actor_id,
                     event_time=event_time,
                     public_time=accepted_at,

@@ -187,7 +187,7 @@ def build_research_interactions(
     near_high = features.get("market.within_10pct_252d_high")
     contract_surprise = features.get("contracts.surprise_30d")
     new_lobbying_topics = features.get("lobbying.new_issue_codes_90d")
-    relational = features.get("cross.relational_convergence_30d")
+    relational = features.get("cross.relational_convergence_score")
 
     return {
         "interaction.insider_buy_after_10pct_appreciation_20d": _and_positive(

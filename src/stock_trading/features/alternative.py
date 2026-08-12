@@ -138,7 +138,6 @@ def build_cross_source_features(
         for event in events
         if event.company_id == company_id and event.public_time <= decision
     ]
-    recent_30 = _within(visible, decision, 30)
 
     insider_buys = [
         event
@@ -152,26 +151,27 @@ def build_cross_source_features(
     contracts = [event for event in visible if event.event_type is EventType.GOVERNMENT_CONTRACT]
     lobbying = [event for event in visible if event.event_type is EventType.LOBBYING_ACTIVITY]
 
+    recent_insider_buys = _within(insider_buys, decision, 30)
+    recent_contracts = _within(contracts, decision, 30)
+    recent_lobbying = _within(lobbying, decision, 30)
+
     latest_insider = _latest(insider_buys)
     latest_contract = _latest(contracts)
     latest_lobbying = _latest(lobbying)
 
     features: dict[str, float | None] = {
         "cross.insider_plus_contract_30d": float(
-            _has_type(recent_30, EventType.INSIDER_TRANSACTION)
-            and _has_type(recent_30, EventType.GOVERNMENT_CONTRACT)
+            bool(recent_insider_buys) and bool(recent_contracts)
         ),
         "cross.insider_plus_lobbying_30d": float(
-            _has_type(recent_30, EventType.INSIDER_TRANSACTION)
-            and _has_type(recent_30, EventType.LOBBYING_ACTIVITY)
+            bool(recent_insider_buys) and bool(recent_lobbying)
         ),
         "cross.signal_family_count_30d": float(
             sum(
-                _has_type(recent_30, event_type)
-                for event_type in (
-                    EventType.INSIDER_TRANSACTION,
-                    EventType.GOVERNMENT_CONTRACT,
-                    EventType.LOBBYING_ACTIVITY,
+                (
+                    bool(recent_insider_buys),
+                    bool(recent_contracts),
+                    bool(recent_lobbying),
                 )
             )
         ),
@@ -278,7 +278,3 @@ def _days_between(left: Event | None, right: Event | None) -> float | None:
     if left is None or right is None:
         return None
     return (right.public_time - left.public_time).total_seconds() / 86400.0
-
-
-def _has_type(events: Iterable[Event], event_type: EventType) -> bool:
-    return any(event.event_type is event_type for event in events)

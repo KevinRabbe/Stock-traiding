@@ -62,6 +62,13 @@ class LightGbmModelBundle:
             opportunity_score=score,
         )
 
+    def feature_importance(self, *, importance_type: str = "gain") -> dict[str, float]:
+        values = self.alpha_model.feature_importance(importance_type=importance_type)
+        return {
+            name: float(value)
+            for name, value in zip(self.feature_schema.names, values, strict=True)
+        }
+
     def save(self, directory: str | Path) -> Path:
         root = Path(directory)
         root.mkdir(parents=True, exist_ok=True)
@@ -120,6 +127,7 @@ class LightGbmTrainer:
             np.asarray([row.alpha_20d for row in train_rows], dtype=np.float64),
             validation_x,
             np.asarray([row.alpha_20d for row in validation_rows], dtype=np.float64),
+            feature_names=schema.names,
             objective="regression_l2",
             metric="l2",
         )
@@ -128,6 +136,7 @@ class LightGbmTrainer:
             np.asarray([row.downside_20d for row in train_rows], dtype=np.float64),
             validation_x,
             np.asarray([row.downside_20d for row in validation_rows], dtype=np.float64),
+            feature_names=schema.names,
             objective="regression_l1",
             metric="l1",
         )
@@ -136,6 +145,7 @@ class LightGbmTrainer:
             np.asarray([row.positive_alpha_20d for row in train_rows], dtype=np.float64),
             validation_x,
             np.asarray([row.positive_alpha_20d for row in validation_rows], dtype=np.float64),
+            feature_names=schema.names,
             objective="binary",
             metric="binary_logloss",
         )
@@ -156,6 +166,7 @@ class LightGbmTrainer:
         validation_x: np.ndarray,
         validation_y: np.ndarray,
         *,
+        feature_names: tuple[str, ...],
         objective: str,
         metric: str,
     ) -> lgb.Booster:
@@ -180,7 +191,7 @@ class LightGbmTrainer:
         train_set = lgb.Dataset(
             train_x,
             label=train_y,
-            feature_name=list(self._feature_names(train_x.shape[1])),
+            feature_name=list(feature_names),
             free_raw_data=False,
         )
         validation_set = lgb.Dataset(
@@ -204,9 +215,3 @@ class LightGbmTrainer:
                 lgb.log_evaluation(period=0),
             ],
         )
-
-    @staticmethod
-    def _feature_names(count: int) -> tuple[str, ...]:
-        # LightGBM only needs stable column positions internally here; the real
-        # feature names are retained in FeatureSchema and persisted with the bundle.
-        return tuple(f"f{index}" for index in range(count))

@@ -1,4 +1,5 @@
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
 from .models import MarketBar
@@ -92,7 +93,7 @@ class DuckDbMarketStore:
                 rows,
             )
 
-    def next_bar_after(self, company_id: str, day: date) -> dict | None:
+    def next_bar_after(self, company_id: str, day: date) -> MarketBar | None:
         with self._connect() as connection:
             cursor = connection.execute(
                 """
@@ -103,9 +104,40 @@ class DuckDbMarketStore:
                 """,
                 [company_id, day],
             )
-            return _one_dict(cursor)
+            row = _one_dict(cursor)
+        return _market_bar(row) if row is not None else None
 
-    def bars_from(self, company_id: str, start_day: date, limit: int) -> list[dict]:
+    def bar_on(self, company_id: str, day: date) -> MarketBar | None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "SELECT * FROM market_daily WHERE company_id = ? AND date = ?",
+                [company_id, day],
+            )
+            row = _one_dict(cursor)
+        return _market_bar(row) if row is not None else None
+
+    def bars_before(self, company_id: str, day: date, limit: int) -> list[MarketBar]:
+        """Return up to `limit` completed bars strictly before `day`, oldest first."""
+
+        if limit <= 0:
+            raise ValueError("limit must be > 0")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                SELECT * FROM (
+                    SELECT * FROM market_daily
+                    WHERE company_id = ? AND date < ?
+                    ORDER BY date DESC
+                    LIMIT ?
+                )
+                ORDER BY date
+                """,
+                [company_id, day, limit],
+            )
+            rows = _all_dicts(cursor)
+        return [_market_bar(row) for row in rows]
+
+    def bars_from(self, company_id: str, start_day: date, limit: int) -> list[MarketBar]:
         if limit <= 0:
             raise ValueError("limit must be > 0")
         with self._connect() as connection:
@@ -118,7 +150,8 @@ class DuckDbMarketStore:
                 """,
                 [company_id, start_day, limit],
             )
-            return _all_dicts(cursor)
+            rows = _all_dicts(cursor)
+        return [_market_bar(row) for row in rows]
 
     def export_parquet(self, destination: str | Path) -> Path:
         path = Path(destination)
@@ -130,6 +163,26 @@ class DuckDbMarketStore:
                 f"TO '{escaped}' (FORMAT PARQUET)"
             )
         return path
+
+
+def _market_bar(row: dict) -> MarketBar:
+    return MarketBar(
+        company_id=row["company_id"],
+        ticker=row["ticker"],
+        date=row["date"],
+        open=Decimal(str(row["open"])),
+        high=Decimal(str(row["high"])),
+        low=Decimal(str(row["low"])),
+        close=Decimal(str(row["close"])),
+        volume=Decimal(str(row["volume"])),
+        adj_open=Decimal(str(row["adj_open"])),
+        adj_high=Decimal(str(row["adj_high"])),
+        adj_low=Decimal(str(row["adj_low"])),
+        adj_close=Decimal(str(row["adj_close"])),
+        adj_volume=Decimal(str(row["adj_volume"])),
+        dividend_cash=Decimal(str(row["dividend_cash"])),
+        split_factor=Decimal(str(row["split_factor"])),
+    )
 
 
 def _one_dict(cursor) -> dict | None:

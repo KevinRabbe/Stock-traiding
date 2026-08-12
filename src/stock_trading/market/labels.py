@@ -60,8 +60,12 @@ def build_standard_labels(
     benchmark_bars: Sequence[MarketBar],
     horizons: tuple[int, ...] = (1, 5, 20, 60),
 ) -> tuple[ForwardLabel, ...]:
+    stock_dates = {bar.date for bar in stock_bars}
+    benchmark_dates = {bar.date for bar in benchmark_bars}
+    aligned_count = len(stock_dates & benchmark_dates)
+
     return tuple(
         build_forward_label(stock_bars, benchmark_bars, horizon=horizon)
         for horizon in horizons
-        if len(stock_bars) >= horizon and len(benchmark_bars) >= horizon
+        if horizon > 0 and aligned_count >= horizon
     )

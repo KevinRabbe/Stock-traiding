@@ -16,6 +16,9 @@ dependencies = [
     "pytz>=2024.1",
 ]
 
+[project.scripts]
+stock-traiding-experiment = "stock_trading.experiments.lightgbm:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8",

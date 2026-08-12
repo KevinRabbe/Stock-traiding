@@ -5,12 +5,6 @@ from .lightgbm_models import (
     LightGbmTrainingConfig,
     OpportunityPrediction,
 )
-from .walk_forward import (
-    WalkForwardResult,
-    WalkForwardSplit,
-    annual_walk_forward_splits,
-    run_annual_walk_forward,
-)
 
 __all__ = [
     "FeatureSchema",
@@ -20,9 +14,5 @@ __all__ = [
     "OpportunityPrediction",
     "TrainingDatasetBuilder",
     "TrainingRow",
-    "WalkForwardResult",
-    "WalkForwardSplit",
-    "annual_walk_forward_splits",
     "build_trigger_features",
-    "run_annual_walk_forward",
 ]

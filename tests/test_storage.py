@@ -94,5 +94,11 @@ def test_duckdb_event_store_is_idempotent_and_point_in_time_safe(tmp_path) -> No
     assert len(after) == 1
     assert after[0]["event_id"] == event.event_id
 
+    restored = store.all_events()
+    assert restored == (event,)
+    assert isinstance(restored[0].payload, InsiderTransactionPayload)
+    assert store.all_events(event_types=(EventType.GOVERNMENT_CONTRACT,)) == ()
+    assert store.all_events(event_types=(EventType.INSIDER_TRANSACTION,)) == (event,)
+
     parquet = store.export_parquet(tmp_path / "normalized" / "events.parquet")
     assert parquet.exists()

@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from datetime import date, timedelta
 from pathlib import Path
 
+from stock_trading.entities import company_id_from_sec_cik
 from stock_trading.market import (
     DuckDbMarketStore,
     IssuerObservation,
@@ -79,6 +80,7 @@ def populate_sec_and_market(
     parser = QuarterlyArchiveParser()
 
     observations_by_key: dict[tuple[str, str, str], IssuerObservation] = {}
+    company_manifest: dict[str, dict[str, object]] = {}
     quarters_downloaded = 0
     insider_events = 0
 
@@ -99,6 +101,20 @@ def populate_sec_and_market(
         insider_events += len(events)
 
         for transaction in transactions:
+            company_id = company_id_from_sec_cik(transaction.issuer_cik)
+            company = company_manifest.setdefault(
+                company_id,
+                {
+                    "company_id": company_id,
+                    "sec_cik": transaction.issuer_cik,
+                    "issuer_names": set(),
+                    "tickers": set(),
+                },
+            )
+            company["issuer_names"].add(transaction.issuer_name)
+            if transaction.issuer_symbol:
+                company["tickers"].add(transaction.issuer_symbol)
+
             if not transaction.issuer_symbol:
                 continue
             observation = IssuerObservation(
@@ -115,6 +131,24 @@ def populate_sec_and_market(
             existing = observations_by_key.get(key)
             if existing is None or observation.observed_date < existing.observed_date:
                 observations_by_key[key] = observation
+
+    manifests_dir = data_root / "manifests"
+    manifests_dir.mkdir(parents=True, exist_ok=True)
+    with (manifests_dir / "sec_companies.jsonl").open("w", encoding="utf-8") as handle:
+        for company_id in sorted(company_manifest):
+            company = company_manifest[company_id]
+            handle.write(
+                json.dumps(
+                    {
+                        "company_id": company["company_id"],
+                        "sec_cik": company["sec_cik"],
+                        "issuer_names": sorted(company["issuer_names"]),
+                        "tickers": sorted(company["tickers"]),
+                    },
+                    sort_keys=True,
+                )
+            )
+            handle.write("\n")
 
     observations = tuple(observations_by_key.values())
     if config.max_unique_tickers is not None:
@@ -151,8 +185,7 @@ def populate_sec_and_market(
     )
     market_store.put_many(benchmark_bars)
 
-    unresolved_path = data_root / "manifests" / "unresolved_tiingo.jsonl"
-    unresolved_path.parent.mkdir(parents=True, exist_ok=True)
+    unresolved_path = manifests_dir / "unresolved_tiingo.jsonl"
     with unresolved_path.open("w", encoding="utf-8") as handle:
         for resolution in market_result.resolutions:
             if resolution.resolved:
@@ -198,9 +231,10 @@ def populate_sec_and_market(
         "end_quarter": f"{end_year}Q{end_quarter}",
         "market_start": market_start.isoformat(),
         "market_end": market_end.isoformat(),
+        "sec_company_count": len(company_manifest),
         "unresolved_reason_counts": dict(sorted(reason_counts.items())),
     }
-    (data_root / "manifests" / "sec_market.json").write_text(
+    (manifests_dir / "sec_market.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True),
         encoding="utf-8",
     )

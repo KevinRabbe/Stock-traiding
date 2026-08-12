@@ -1,10 +1,17 @@
 from dataclasses import dataclass
 from datetime import date
 
+import httpx
+
 from stock_trading.storage import FileRawStore
 
 from .normalize import TiingoNormalizer
-from .resolution import ConservativeTiingoResolver, IssuerObservation, SecurityResolution
+from .resolution import (
+    ConservativeTiingoResolver,
+    IssuerObservation,
+    ResolutionStatus,
+    SecurityResolution,
+)
 from .security import SecurityRegistry
 from .store import DuckDbMarketStore
 
@@ -16,6 +23,8 @@ class MarketBackfillResult:
     unresolved_observations: int
     downloaded_price_series: int
     normalized_bars: int
+    failed_metadata_requests: int = 0
+    failed_price_series: int = 0
 
 
 class MarketBackfillService:
@@ -48,15 +57,42 @@ class MarketBackfillService:
         if end < start:
             raise ValueError("end must be >= start")
 
-        metadata_cache = {}
+        metadata_cache: dict[str, object | None] = {}
+        metadata_failures: dict[str, str] = {}
         resolutions: list[SecurityResolution] = []
         series_to_fetch: dict[tuple[str, str], tuple[date, date]] = {}
+        failed_metadata_requests = 0
 
         for observation in observations:
             ticker = observation.ticker.strip().upper().replace(".", "-")
+            if ticker in metadata_failures:
+                resolutions.append(
+                    SecurityResolution(
+                        ResolutionStatus.UNRESOLVED,
+                        observation,
+                        None,
+                        metadata_failures[ticker],
+                    )
+                )
+                continue
+
             metadata = metadata_cache.get(ticker)
             if metadata is None:
-                raw_metadata = self.client.fetch_metadata(ticker)
+                try:
+                    raw_metadata = self.client.fetch_metadata(ticker)
+                except httpx.HTTPError as exc:
+                    failed_metadata_requests += 1
+                    reason = _http_failure_reason("tiingo_metadata", exc)
+                    metadata_failures[ticker] = reason
+                    resolutions.append(
+                        SecurityResolution(
+                            ResolutionStatus.UNRESOLVED,
+                            observation,
+                            None,
+                            reason,
+                        )
+                    )
+                    continue
                 self.raw_store.put(raw_metadata)
                 metadata = self.normalizer.parse_metadata(raw_metadata)
                 metadata_cache[ticker] = metadata
@@ -88,8 +124,14 @@ class MarketBackfillService:
                 series_to_fetch[key] = (min(existing[0], fetch_start), max(existing[1], fetch_end))
 
         normalized_bars = 0
+        downloaded_price_series = 0
+        failed_price_series = 0
         for (company_id, ticker), (fetch_start, fetch_end) in sorted(series_to_fetch.items()):
-            raw_prices = self.client.fetch_prices(ticker, fetch_start, fetch_end)
+            try:
+                raw_prices = self.client.fetch_prices(ticker, fetch_start, fetch_end)
+            except httpx.HTTPError:
+                failed_price_series += 1
+                continue
             self.raw_store.put(raw_prices)
             bars = self.normalizer.parse_prices(
                 raw_prices,
@@ -97,6 +139,7 @@ class MarketBackfillService:
                 ticker=ticker,
             )
             self.market_store.put_many(bars)
+            downloaded_price_series += 1
             normalized_bars += len(bars)
 
         unresolved = sum(1 for resolution in resolutions if not resolution.resolved)
@@ -104,6 +147,14 @@ class MarketBackfillService:
             resolutions=tuple(resolutions),
             resolved_companies=len(series_to_fetch),
             unresolved_observations=unresolved,
-            downloaded_price_series=len(series_to_fetch),
+            downloaded_price_series=downloaded_price_series,
             normalized_bars=normalized_bars,
+            failed_metadata_requests=failed_metadata_requests,
+            failed_price_series=failed_price_series,
         )
+
+
+def _http_failure_reason(prefix: str, exc: httpx.HTTPError) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"{prefix}_http_{exc.response.status_code}"
+    return f"{prefix}_request_error"

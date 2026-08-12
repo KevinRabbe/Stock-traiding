@@ -62,7 +62,26 @@ Install the project first:
 python -m pip install -e ".[dev]"
 ```
 
-### 1. Populate SEC insiders + verified Tiingo market history
+### 0. Scan the SEC universe before spending market-data quota
+
+This mode downloads and normalizes the real SEC insider history but makes **no Tiingo calls** and does not require a market-data token:
+
+```bash
+python -m stock_trading.experiments.prepare \
+  --sec-only \
+  --data-root data \
+  --start-year 2012 \
+  --sec-user-agent "Stock-traiding your-contact@example.com"
+```
+
+It writes the canonical SEC events plus:
+
+- `data/manifests/sec_companies.jsonl`
+- `data/manifests/sec_universe.json`
+
+`sec_universe.json` reports the company/ticker universe and a conservative minimum Tiingo request estimate for the current backfill implementation. This is the recommended first real-data command.
+
+### 1. Populate verified Tiingo market history
 
 Set the Tiingo token only in the environment:
 
@@ -70,7 +89,7 @@ Set the Tiingo token only in the environment:
 export TIINGO_API_TOKEN="..."
 ```
 
-Then populate the normalized stores:
+Then populate the SEC + market stores:
 
 ```bash
 python -m stock_trading.experiments.prepare \
@@ -79,7 +98,7 @@ python -m stock_trading.experiments.prepare \
   --sec-user-agent "Stock-traiding your-contact@example.com"
 ```
 
-This also stores SPY under the stable benchmark company ID `benchmark_spy`, writes an SEC company-identity manifest, and records unresolved/dead historical tickers instead of guessing them.
+This stores SPY under the stable benchmark company ID `benchmark_spy`, writes the SEC company-identity manifest, and records unresolved/dead historical tickers instead of guessing them.
 
 For a small smoke run before a full Tiingo backfill:
 
@@ -91,7 +110,9 @@ python -m stock_trading.experiments.prepare \
   --sec-user-agent "Stock-traiding your-contact@example.com"
 ```
 
-### 2. Enrich historical LDA filings with local Qwen
+### 2. Optionally enrich historical LDA filings with local Qwen
+
+The first genuine **SEC-insider + market** LightGBM baseline can already be run after step 1. This enrichment step adds the richer lobbying/semantic feature family for the full baseline.
 
 Run a local OpenAI-compatible Qwen3.5-4B endpoint at `http://127.0.0.1:8000/v1` or set `QWEN_BASE_URL`.
 An LDA API token is optional; when available it can be supplied through `LDA_API_TOKEN`.
@@ -117,9 +138,20 @@ python -m stock_trading.experiments.lightgbm \
 
 The result bundle contains database hashes, frozen training rows, yearly model files, score buckets, portfolio results, feature importance, best-trade-removal stress tests, and aggregate walk-forward reporting.
 
+A useful progression is:
+
+1. SEC-only universe scan
+2. 50-symbol market smoke run
+3. full SEC-insider + market walk-forward baseline
+4. LDA + Qwen enrichment
+5. full enriched walk-forward baseline
+6. only then decide whether the ~15M temporal model has a baseline worth trying to beat
+
 ## Point-in-time rule
 
 Information is usable only after its documented public timestamp. Historical USAspending `action_date` is not assumed to be a historical publication timestamp, so historical contract records are not silently injected into backtests without a trustworthy visibility time. Live observed USAspending events remain supported.
+
+Congressional financial-disclosure features remain disabled by default pending the existing legal-use decision. If enabled later, they are represented conditionally through leadership/power, committee relevance, abnormal trade size, public-sentiment divergence, and corporate/political relationships rather than raw copy-trading direction.
 
 ## Development
 

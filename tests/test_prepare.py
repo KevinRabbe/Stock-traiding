@@ -2,7 +2,12 @@ from datetime import date
 
 import pytest
 
-from stock_trading.experiments.prepare import latest_completed_quarter, quarter_range
+from stock_trading.experiments.prepare import (
+    _parser,
+    estimate_tiingo_requests,
+    latest_completed_quarter,
+    quarter_range,
+)
 from stock_trading.ml import TrainingDatasetBuilder
 
 
@@ -19,6 +24,30 @@ def test_quarter_range_crosses_year_boundary() -> None:
         (2026, 1),
         (2026, 2),
     )
+
+
+def test_estimated_tiingo_requests_are_explicit() -> None:
+    assert estimate_tiingo_requests(50) == {
+        "metadata": 50,
+        "price_series": 50,
+        "benchmark": 1,
+        "minimum_total": 101,
+    }
+    with pytest.raises(ValueError, match=">= 0"):
+        estimate_tiingo_requests(-1)
+
+
+def test_sec_only_cli_does_not_require_market_arguments() -> None:
+    args = _parser().parse_args(
+        [
+            "--sec-only",
+            "--sec-user-agent",
+            "Stock-traiding test@example.com",
+        ]
+    )
+    assert args.sec_only is True
+    assert args.start_year == 2012
+    assert args.max_unique_tickers is None
 
 
 def test_training_dataset_rejects_non_20_day_target() -> None:

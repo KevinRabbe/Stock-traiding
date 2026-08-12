@@ -157,11 +157,7 @@ def build_cross_source_features(
     insider_buys = [
         event
         for event in visible
-        if event.event_type is EventType.INSIDER_TRANSACTION
-        and (
-            getattr(event.payload, "intent_class", None) == "DISCRETIONARY_BUY"
-            or getattr(event.payload, "direction", None) is TradeDirection.BUY
-        )
+        if event.event_type is EventType.INSIDER_TRANSACTION and _is_discretionary_buy(event)
     ]
     contracts = [event for event in visible if event.event_type is EventType.GOVERNMENT_CONTRACT]
     lobbying = [event for event in visible if event.event_type is EventType.LOBBYING_ACTIVITY]
@@ -208,7 +204,7 @@ def build_cross_source_features(
     shared_topics = contract_topics & lobbying_topics
     features["cross.shared_contract_lobbying_topics_90d"] = float(len(shared_topics))
     features["cross.topic_aligned_contract_lobbying_90d"] = float(bool(shared_topics))
-    features["cross.relational_convergence_30d"] = float(
+    features["cross.relational_convergence_score"] = float(
         bool(recent_insider_buys)
         + bool(recent_contracts)
         + bool(recent_lobbying)
@@ -351,3 +347,10 @@ def _three_stage_sequence(
         for two in second
         for three in third
     )
+
+
+def _is_discretionary_buy(event: Event) -> bool:
+    intent = getattr(event.payload, "intent_class", None)
+    if intent is not None:
+        return intent == "DISCRETIONARY_BUY"
+    return getattr(event.payload, "direction", None) is TradeDirection.BUY

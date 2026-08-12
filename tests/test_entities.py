@@ -33,7 +33,7 @@ def test_invalid_sec_cik_is_rejected() -> None:
         normalize_sec_cik("12A45")
 
 
-def test_external_aliases_are_idempotent_and_conflicts_fail_closed(tmp_path) -> None:
+def test_external_aliases_lock_company_mapping_but_allow_metadata_variation(tmp_path) -> None:
     pytest.importorskip("duckdb")
     store = DuckDbExternalEntityAliases(tmp_path / "aliases.duckdb")
     alias = ExternalEntityAlias(
@@ -46,6 +46,15 @@ def test_external_aliases_are_idempotent_and_conflicts_fail_closed(tmp_path) -> 
 
     store.add(alias)
     store.add(alias)
+    store.add(
+        ExternalEntityAlias(
+            source=Source.USASPENDING,
+            external_id="PARENTUEI",
+            company_id="cmp_parent",
+            display_name="EXAMPLE DEFENSE CORPORATION",
+            resolution_basis="same verified external identity observed later",
+        )
+    )
 
     assert store.resolve(Source.USASPENDING, "PARENTUEI") == "cmp_parent"
     assert store.aliases_for("cmp_parent") == (
@@ -58,7 +67,7 @@ def test_external_aliases_are_idempotent_and_conflicts_fail_closed(tmp_path) -> 
         ),
     )
 
-    with pytest.raises(ValueError, match="already mapped differently"):
+    with pytest.raises(ValueError, match="different canonical company"):
         store.add(
             ExternalEntityAlias(
                 source=Source.USASPENDING,

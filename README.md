@@ -2,47 +2,46 @@
 
 Private trading-system research and implementation repository.
 
-The system is being built around point-in-time-safe alternative data, semantic extraction, machine-learning opportunity ranking, deterministic risk controls, and deliberately simple execution.
+The project is being built around point-in-time-safe alternative data, semantic extraction, machine-learning opportunity ranking, deterministic risk controls, and deliberately simple execution.
 
-## Core architecture
+## Implemented foundations
 
-```text
-Raw public data
-    -> immutable RawRecord
-    -> source-specific Normalizer
-    -> canonical Event
-    -> point-in-time feature state
-    -> LightGBM + temporal trading model
-    -> deterministic trade filter
-    -> fixed-percentage risk/execution layer
-```
+### Milestone 1 — core contracts
 
-Qwen is planned as a semantic extraction layer for text-heavy sources. Authoritative source fields and model-generated semantic annotations are kept separate.
+- immutable raw records and canonical sparse events
+- strict timezone-aware UTC timestamps
+- deterministic identifiers for idempotent ingestion
+- typed source payloads
+- Qwen semantic annotations isolated from authoritative source fields
+- minimal collector/normalizer interfaces
 
-## Milestone 1: data contracts
+### Milestone 2 — SEC insiders
 
-The current foundation defines:
+- quarterly Form 3/4/5 archive parsing with V1 normalization of non-derivative Form 4/4-A transactions
+- live Form 4 XML parsing with exact EDGAR acceptance timestamps
+- SEC submissions metadata parsing for live Form 4 discovery
+- transaction-code intent classification
+- 10b5-1 filing flag preservation
+- canonical company IDs anchored to SEC CIK
+- immutable raw storage and DuckDB normalized event storage
 
-- immutable raw records with SHA-256 verification
-- deterministic event IDs for idempotent ingestion
-- UTC-only internal timestamps; naive datetimes are rejected
-- separate `event_time`, `public_time`, and `first_tradable_time`
-- typed payloads for insider trades, contracts, lobbying, FX, Congress, market bars, and corporate actions
-- semantic annotations that cannot overwrite source facts
-- collector and normalizer protocols
-- regression tests for leakage-critical invariants
+### Milestone 3 — market data
 
-The core rule is that an event cannot be used as information before `public_time`, and execution cannot occur before `first_tradable_time`.
+- Tiingo EOD collection and normalization
+- raw + adjusted OHLCV, dividends, and split factors
+- conservative SEC issuer -> Tiingo resolution with ticker-reuse protection
+- point-in-time security/ticker intervals
+- dense DuckDB market storage
+- point-in-time market features using only completed prior sessions
+- conservative next-regular-session execution timing
+- forward return, benchmark alpha, MFE, and MAE labels
+- candidate snapshots that keep model inputs separate from future outcomes
 
 ## Development
 
-Python 3.11+ is required.
-
 ```bash
-python -m venv .venv
-# activate the virtual environment
-pip install -e ".[dev]"
+python -m pip install -e ".[dev]"
 pytest
 ```
 
-Large datasets, model artifacts, caches, logs, and local secrets are intentionally excluded from Git.
+GitHub Actions runs the complete dependency-backed test suite on pull requests.

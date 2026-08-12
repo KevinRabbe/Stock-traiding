@@ -129,6 +129,40 @@ def test_contract_and_sequence_features_reward_new_relationship_order() -> None:
     assert features["cross.lobbying_then_insider_then_contract_180d"] == 1.0
 
 
+def test_planned_buy_does_not_count_as_discretionary_convergence() -> None:
+    planned = _event(
+        EventType.INSIDER_TRANSACTION,
+        Source.SEC_EDGAR,
+        "planned-buy",
+        BASE - timedelta(days=20),
+        InsiderTransactionPayload(
+            source_transaction_code="A",
+            direction=TradeDirection.BUY,
+            shares=Decimal("100"),
+            value=Decimal("1000"),
+            intent_class="PLANNED_BUY",
+            is_10b5_1=True,
+        ),
+        actor_id="owner-planned",
+    )
+    contract = _event(
+        EventType.GOVERNMENT_CONTRACT,
+        Source.USASPENDING,
+        "contract-planned-test",
+        BASE - timedelta(days=5),
+        GovernmentContractPayload(
+            award_id="award-planned-test",
+            agency="DoD",
+            obligation_amount=Decimal("1000000"),
+        ),
+    )
+    features = build_alternative_features(
+        (planned, contract), company_id=COMPANY, decision_time=BASE
+    )
+    assert features["cross.insider_plus_contract_30d"] == 0.0
+    assert features["cross.insider_buy_before_contract_90d"] == 0.0
+
+
 def test_microcap_style_price_state_interactions_are_explicit() -> None:
     features = build_research_interactions(
         {
@@ -138,7 +172,7 @@ def test_microcap_style_price_state_interactions_are_explicit() -> None:
             "insider.cluster_buy_30d": 1.0,
             "contracts.surprise_30d": 2.5,
             "lobbying.new_issue_codes_90d": 1.0,
-            "cross.relational_convergence_30d": 4.0,
+            "cross.relational_convergence_score": 4.0,
         }
     )
     assert features["interaction.insider_buy_after_10pct_appreciation_20d"] == 1.0

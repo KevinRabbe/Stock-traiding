@@ -1,3 +1,4 @@
+from .aliases import DuckDbExternalEntityAliases, ExternalEntityAlias
 from .company import (
     CompanyIdentity,
     CompanyRegistry,
@@ -8,6 +9,8 @@ from .company import (
 __all__ = [
     "CompanyIdentity",
     "CompanyRegistry",
+    "DuckDbExternalEntityAliases",
+    "ExternalEntityAlias",
     "company_id_from_sec_cik",
     "normalize_sec_cik",
 ]

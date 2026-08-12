@@ -24,7 +24,10 @@ class TrainingRow:
     company_id: str
     decision_time: datetime
     execution_date: date
+    exit_date_20d: date
     features: dict[str, float | None]
+    stock_return_20d: float
+    benchmark_return_20d: float
     alpha_20d: float
     downside_20d: float
     mfe_20d: float
@@ -120,8 +123,11 @@ class TrainingDatasetBuilder:
                     event_id=trigger.event_id,
                     company_id=trigger.company_id,
                     decision_time=trigger.public_time,
-                    execution_date=snapshot.execution_date,
+                    execution_date=label.start_date,
+                    exit_date_20d=label.end_date,
                     features=features,
+                    stock_return_20d=label.stock_return,
+                    benchmark_return_20d=label.benchmark_return,
                     alpha_20d=label.alpha,
                     downside_20d=max(0.0, -label.max_adverse_excursion),
                     mfe_20d=max(0.0, label.max_favorable_excursion),

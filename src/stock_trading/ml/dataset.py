@@ -7,7 +7,11 @@ import numpy as np
 
 from stock_trading.core import Event, EventType
 from stock_trading.extraction import ALLOWED_TOPICS
-from stock_trading.features import build_alternative_features, build_insider_features
+from stock_trading.features import (
+    build_alternative_features,
+    build_congress_features,
+    build_insider_features,
+)
 from stock_trading.market import CandidateSnapshotBuilder
 
 
@@ -62,7 +66,7 @@ class FeatureSchema:
 
 
 class TrainingDatasetBuilder:
-    """Create model-ready rows without crossing the point-in-time boundary."""
+    """Create model-ready 20-trading-day rows without crossing the PIT boundary."""
 
     def __init__(
         self,
@@ -70,12 +74,14 @@ class TrainingDatasetBuilder:
         *,
         positive_alpha_threshold: float = 0.02,
         target_horizon: int = 20,
+        enable_congress_features: bool = False,
     ) -> None:
-        if target_horizon <= 0:
-            raise ValueError("target_horizon must be > 0")
+        if target_horizon != 20:
+            raise ValueError("V1 TrainingRow fields are fixed to a 20-day target")
         self.snapshot_builder = snapshot_builder
         self.positive_alpha_threshold = positive_alpha_threshold
         self.target_horizon = target_horizon
+        self.enable_congress_features = enable_congress_features
 
     def build(
         self,
@@ -116,8 +122,16 @@ class TrainingDatasetBuilder:
                     company_id=trigger.company_id,
                     decision_time=trigger.public_time,
                 ),
+                **build_congress_features(
+                    event_history,
+                    company_id=trigger.company_id,
+                    decision_time=trigger.public_time,
+                    enabled=self.enable_congress_features,
+                ),
                 **build_trigger_features(trigger),
             }
+            features.update(build_research_interactions(features))
+
             rows.append(
                 TrainingRow(
                     event_id=trigger.event_id,
@@ -160,6 +174,42 @@ def build_trigger_features(event: Event) -> dict[str, float | None]:
         feature_name = "trigger.topic." + topic.lower().replace(".", "_")
         features[feature_name] = float(topic in topics)
     return features
+
+
+def build_research_interactions(
+    features: dict[str, float | None],
+) -> dict[str, float | None]:
+    """Explicit interaction features motivated by recent alternative-data evidence."""
+
+    appreciation = features.get("market.appreciation_gt_10pct_20d")
+    open_market_buys = features.get("insider.open_market_buy_count_30d")
+    cluster_buy = features.get("insider.cluster_buy_30d")
+    near_high = features.get("market.within_10pct_252d_high")
+    contract_surprise = features.get("contracts.surprise_30d")
+    new_lobbying_topics = features.get("lobbying.new_issue_codes_90d")
+    relational = features.get("cross.relational_convergence_score")
+
+    return {
+        "interaction.insider_buy_after_10pct_appreciation_20d": _and_positive(
+            appreciation,
+            open_market_buys,
+        ),
+        "interaction.cluster_buy_near_52w_high": _and_positive(cluster_buy, near_high),
+        "interaction.contract_acceleration_plus_new_lobbying_topic": (
+            float(contract_surprise > 1.0 and new_lobbying_topics > 0)
+            if contract_surprise is not None and new_lobbying_topics is not None
+            else None
+        ),
+        "interaction.multi_source_convergence": (
+            float(relational >= 3.0) if relational is not None else None
+        ),
+    }
+
+
+def _and_positive(left: float | None, right: float | None) -> float | None:
+    if left is None or right is None:
+        return None
+    return float(left > 0 and right > 0)
 
 
 def _trigger_value(event: Event) -> float | None:

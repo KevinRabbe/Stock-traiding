@@ -23,9 +23,15 @@ def build_contract_features(
         features[f"contracts.obligation_{days}d"] = sum(numeric) if numeric else 0.0
 
     recent_90 = _within(contracts, decision, 90)
+    older_365 = _between(contracts, decision, 365, 90)
     agencies = {
         event.payload.agency
         for event in recent_90
+        if getattr(event.payload, "agency", None)
+    }
+    older_agencies = {
+        event.payload.agency
+        for event in older_365
         if getattr(event.payload, "agency", None)
     }
     obligations_90 = [
@@ -34,7 +40,16 @@ def build_contract_features(
         if value is not None
     ]
     features["contracts.unique_agencies_90d"] = float(len(agencies))
+    features["contracts.new_agencies_90d"] = float(len(agencies - older_agencies))
+    features["contracts.has_new_agency_relationship_90d"] = float(bool(agencies - older_agencies))
+    features["contracts.first_contract_in_90d"] = float(
+        bool(recent_90)
+        and not any(event.public_time <= decision - timedelta(days=90) for event in contracts)
+    )
     features["contracts.largest_obligation_90d"] = max(obligations_90, default=0.0)
+    features["contracts.agency_concentration_365d"] = _agency_concentration(
+        _within(contracts, decision, 365)
+    )
 
     current_30 = _sum_contracts(_within(contracts, decision, 30))
     previous_30 = _sum_contracts(_between(contracts, decision, 60, 30))
@@ -142,11 +157,7 @@ def build_cross_source_features(
     insider_buys = [
         event
         for event in visible
-        if event.event_type is EventType.INSIDER_TRANSACTION
-        and (
-            getattr(event.payload, "intent_class", None) == "DISCRETIONARY_BUY"
-            or getattr(event.payload, "direction", None) is TradeDirection.BUY
-        )
+        if event.event_type is EventType.INSIDER_TRANSACTION and _is_discretionary_buy(event)
     ]
     contracts = [event for event in visible if event.event_type is EventType.GOVERNMENT_CONTRACT]
     lobbying = [event for event in visible if event.event_type is EventType.LOBBYING_ACTIVITY]
@@ -177,12 +188,27 @@ def build_cross_source_features(
         ),
         "cross.days_insider_to_contract": _days_between(latest_insider, latest_contract),
         "cross.days_lobbying_to_contract": _days_between(latest_lobbying, latest_contract),
+        "cross.insider_buy_before_contract_90d": float(
+            _ordered_within(insider_buys, contracts, decision, 90)
+        ),
+        "cross.lobbying_before_contract_90d": float(
+            _ordered_within(lobbying, contracts, decision, 90)
+        ),
+        "cross.lobbying_then_insider_then_contract_180d": float(
+            _three_stage_sequence(lobbying, insider_buys, contracts, decision, 180)
+        ),
     }
 
     contract_topics = _semantic_topics(_within(contracts, decision, 90))
     lobbying_topics = _semantic_topics(_within(lobbying, decision, 90))
-    features["cross.shared_contract_lobbying_topics_90d"] = float(
-        len(contract_topics & lobbying_topics)
+    shared_topics = contract_topics & lobbying_topics
+    features["cross.shared_contract_lobbying_topics_90d"] = float(len(shared_topics))
+    features["cross.topic_aligned_contract_lobbying_90d"] = float(bool(shared_topics))
+    features["cross.relational_convergence_score"] = float(
+        bool(recent_insider_buys)
+        + bool(recent_contracts)
+        + bool(recent_lobbying)
+        + bool(shared_topics)
     )
     return features
 
@@ -248,6 +274,20 @@ def _sum_contracts(events: Iterable[Event]) -> float:
     )
 
 
+def _agency_concentration(events: Iterable[Event]) -> float | None:
+    by_agency: dict[str, float] = {}
+    for event in events:
+        agency = getattr(event.payload, "agency", None)
+        value = _contract_obligation(event)
+        if not agency or value is None or value <= 0:
+            continue
+        by_agency[agency] = by_agency.get(agency, 0.0) + value
+    total = sum(by_agency.values())
+    if total <= 0:
+        return None
+    return max(by_agency.values()) / total
+
+
 def _lobbying_amount(event: Event) -> float | None:
     value = getattr(event.payload, "amount", None)
     return float(value) if value is not None else None
@@ -278,3 +318,39 @@ def _days_between(left: Event | None, right: Event | None) -> float | None:
     if left is None or right is None:
         return None
     return (right.public_time - left.public_time).total_seconds() / 86400.0
+
+
+def _ordered_within(
+    first_events: Iterable[Event],
+    second_events: Iterable[Event],
+    decision: datetime,
+    days: int,
+) -> bool:
+    first = _within(first_events, decision, days)
+    second = _within(second_events, decision, days)
+    return any(left.public_time < right.public_time for left in first for right in second)
+
+
+def _three_stage_sequence(
+    first_events: Iterable[Event],
+    second_events: Iterable[Event],
+    third_events: Iterable[Event],
+    decision: datetime,
+    days: int,
+) -> bool:
+    first = _within(first_events, decision, days)
+    second = _within(second_events, decision, days)
+    third = _within(third_events, decision, days)
+    return any(
+        one.public_time < two.public_time < three.public_time
+        for one in first
+        for two in second
+        for three in third
+    )
+
+
+def _is_discretionary_buy(event: Event) -> bool:
+    intent = getattr(event.payload, "intent_class", None)
+    if intent is not None:
+        return intent == "DISCRETIONARY_BUY"
+    return getattr(event.payload, "direction", None) is TradeDirection.BUY

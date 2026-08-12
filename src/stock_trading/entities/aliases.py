@@ -16,8 +16,9 @@ class ExternalEntityAlias:
 class DuckDbExternalEntityAliases:
     """Verified source identifier -> canonical company mappings.
 
-    The same source identifier may never silently move to a different company.
-    New relationships must be explicitly registered with a resolution basis.
+    The identity invariant is `(source, external_id) -> company_id`. Display
+    names and resolution notes are provenance metadata and may vary harmlessly
+    across later source observations.
     """
 
     def __init__(self, database_path: str | Path) -> None:
@@ -58,24 +59,16 @@ class DuckDbExternalEntityAliases:
         with self._connect() as connection:
             existing = connection.execute(
                 """
-                SELECT company_id, display_name, resolution_basis
-                FROM external_entity_aliases
+                SELECT company_id FROM external_entity_aliases
                 WHERE source = ? AND external_id = ?
                 """,
                 [normalized.source.value, normalized.external_id],
             ).fetchone()
             if existing is not None:
-                existing_alias = ExternalEntityAlias(
-                    source=normalized.source,
-                    external_id=normalized.external_id,
-                    company_id=existing[0],
-                    display_name=existing[1],
-                    resolution_basis=existing[2],
-                )
-                if existing_alias != normalized:
+                if existing[0] != normalized.company_id:
                     raise ValueError(
                         f"external identity {normalized.source.value}:{normalized.external_id} "
-                        "is already mapped differently"
+                        "is already mapped to a different canonical company"
                     )
                 return
 

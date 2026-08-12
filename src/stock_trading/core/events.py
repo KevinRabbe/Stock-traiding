@@ -96,6 +96,20 @@ class CongressTransactionPayload(FrozenModel):
     amount_max: Decimal | None = Field(default=None, ge=0)
     transaction_description: str | None = None
 
+    # Context is deliberately first-class because pooled congressional trade
+    # direction is not treated as a standalone alpha signal.
+    politician_role: str | None = None
+    is_leadership: bool | None = None
+    leadership_rank: float | None = Field(default=None, ge=0.0, le=1.0)
+    committees: tuple[str, ...] = ()
+    committee_relevance: float | None = Field(default=None, ge=0.0, le=1.0)
+    trade_size_percentile: float | None = Field(default=None, ge=0.0, le=1.0)
+    public_sentiment_score: float | None = Field(default=None, ge=-1.0, le=1.0)
+    sentiment_divergence: float | None = Field(default=None, ge=-2.0, le=2.0)
+    corporate_connection_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    home_state_connection: bool | None = None
+    donor_connection: bool | None = None
+
     @model_validator(mode="after")
     def validate_amount_band(self) -> "CongressTransactionPayload":
         if (

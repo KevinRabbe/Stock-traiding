@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import date
 
 from .models import MarketBar
 
@@ -7,6 +8,8 @@ from .models import MarketBar
 @dataclass(frozen=True, slots=True)
 class ForwardLabel:
     horizon: int
+    start_date: date
+    end_date: date
     stock_return: float
     benchmark_return: float
     alpha: float
@@ -47,6 +50,8 @@ def build_forward_label(
 
     return ForwardLabel(
         horizon=horizon,
+        start_date=dates[0],
+        end_date=dates[-1],
         stock_return=stock_return,
         benchmark_return=benchmark_return,
         alpha=stock_return - benchmark_return,

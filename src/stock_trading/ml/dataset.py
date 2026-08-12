@@ -62,7 +62,7 @@ class FeatureSchema:
 
 
 class TrainingDatasetBuilder:
-    """Create model-ready rows without crossing the point-in-time boundary."""
+    """Create model-ready 20-trading-day rows without crossing the PIT boundary."""
 
     def __init__(
         self,
@@ -71,8 +71,8 @@ class TrainingDatasetBuilder:
         positive_alpha_threshold: float = 0.02,
         target_horizon: int = 20,
     ) -> None:
-        if target_horizon <= 0:
-            raise ValueError("target_horizon must be > 0")
+        if target_horizon != 20:
+            raise ValueError("V1 TrainingRow fields are fixed to a 20-day target")
         self.snapshot_builder = snapshot_builder
         self.positive_alpha_threshold = positive_alpha_threshold
         self.target_horizon = target_horizon

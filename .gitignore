@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Local data and model artifacts
+data/raw/
+data/normalized/
+data/features/
+data/datasets/
+data/models/
+models/
+artifacts/
+
+# Logs / caches
+logs/
+cache/
+*.log

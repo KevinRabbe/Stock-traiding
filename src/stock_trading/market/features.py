@@ -32,6 +32,11 @@ def build_market_features(
             else None
         )
 
+    return_20d = features["market.return_20d"]
+    features["market.appreciation_gt_10pct_20d"] = (
+        float(return_20d > 0.10) if return_20d is not None else None
+    )
+
     for window in _VOLATILITY_WINDOWS:
         features[f"market.volatility_{window}d"] = _realized_volatility(stock, window)
 
@@ -42,6 +47,11 @@ def build_market_features(
     features["market.distance_20d_low"] = _distance_from_low(stock, window=20)
     features["market.distance_252d_high"] = _distance_from_high(stock, window=252)
     features["market.distance_252d_low"] = _distance_from_low(stock, window=252)
+    features["market.within_10pct_252d_high"] = (
+        float(features["market.distance_252d_high"] >= -0.10)
+        if features["market.distance_252d_high"] is not None
+        else None
+    )
     return features
 
 

@@ -1,10 +1,14 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 from math import ceil, prod
 from statistics import median
-
-from stock_trading.ml.walk_forward import WalkForwardResult
+from typing import TYPE_CHECKING
 
 from .portfolio import BacktestResult, ScoredCandidate
+
+if TYPE_CHECKING:
+    from stock_trading.ml.walk_forward import WalkForwardResult
 
 
 @dataclass(frozen=True, slots=True)

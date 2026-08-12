@@ -31,6 +31,7 @@ class SecMarketPopulationConfig:
     market_start: date | None = None
     market_end: date | None = None
     max_unique_tickers: int | None = None
+    sec_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +39,8 @@ class SecMarketPopulationResult:
     quarters_downloaded: int
     insider_events: int
     issuer_observations: int
+    unique_tickers: int
+    sec_companies: int
     resolved_companies: int
     unresolved_observations: int
     market_bars: int
@@ -53,7 +56,7 @@ def populate_sec_and_market(
     config: SecMarketPopulationConfig,
     *,
     sec_client: SecClient,
-    tiingo_client: TiingoClient,
+    tiingo_client: TiingoClient | None,
 ) -> SecMarketPopulationResult:
     if config.start_year < 2006:
         raise ValueError("SEC quarterly insider history starts in 2006")
@@ -76,7 +79,6 @@ def populate_sec_and_market(
     events_db = data_root / "normalized" / "events.duckdb"
     market_db = data_root / "normalized" / "market.duckdb"
     event_store = DuckDbEventStore(events_db)
-    market_store = DuckDbMarketStore(market_db)
     parser = QuarterlyArchiveParser()
 
     observations_by_key: dict[tuple[str, str, str], IssuerObservation] = {}
@@ -150,22 +152,62 @@ def populate_sec_and_market(
             )
             handle.write("\n")
 
-    observations = tuple(observations_by_key.values())
+    all_observations = tuple(observations_by_key.values())
+    total_unique_tickers = len({_normalized_ticker(item.ticker) for item in all_observations})
+    observations = all_observations
     if config.max_unique_tickers is not None:
         allowed_tickers = set(
-            sorted({observation.ticker for observation in observations})[
+            sorted({_normalized_ticker(observation.ticker) for observation in observations})[
                 : config.max_unique_tickers
             ]
         )
         observations = tuple(
-            observation for observation in observations if observation.ticker in allowed_tickers
+            observation
+            for observation in observations
+            if _normalized_ticker(observation.ticker) in allowed_tickers
         )
 
+    selected_unique_tickers = len({_normalized_ticker(item.ticker) for item in observations})
     market_start = config.market_start or date(config.start_year, 1, 1) - timedelta(days=400)
     market_end = config.market_end or today
     if market_end < market_start:
         raise ValueError("market_end must not precede market_start")
 
+    if config.sec_only:
+        result = SecMarketPopulationResult(
+            quarters_downloaded=quarters_downloaded,
+            insider_events=insider_events,
+            issuer_observations=len(observations),
+            unique_tickers=selected_unique_tickers,
+            sec_companies=len(company_manifest),
+            resolved_companies=0,
+            unresolved_observations=0,
+            market_bars=0,
+            failed_metadata_requests=0,
+            failed_price_series=0,
+            benchmark_bars=0,
+            events_db=events_db,
+            market_db=market_db,
+            benchmark_company_id=BENCHMARK_SPY_COMPANY_ID,
+        )
+        manifest = {
+            **_jsonable(asdict(result)),
+            "mode": "sec_only",
+            "start_quarter": f"{config.start_year}Q{config.start_quarter}",
+            "end_quarter": f"{end_year}Q{end_quarter}",
+            "total_unique_tickers_before_limit": total_unique_tickers,
+            "estimated_tiingo_requests": estimate_tiingo_requests(selected_unique_tickers),
+        }
+        (manifests_dir / "sec_universe.json").write_text(
+            json.dumps(manifest, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        return result
+
+    if tiingo_client is None:
+        raise ValueError("tiingo_client is required unless sec_only=True")
+
+    market_store = DuckDbMarketStore(market_db)
     market_result = MarketBackfillService(
         client=tiingo_client,
         raw_store=raw_store,
@@ -215,6 +257,8 @@ def populate_sec_and_market(
         quarters_downloaded=quarters_downloaded,
         insider_events=insider_events,
         issuer_observations=len(observations),
+        unique_tickers=selected_unique_tickers,
+        sec_companies=len(company_manifest),
         resolved_companies=market_result.resolved_companies,
         unresolved_observations=market_result.unresolved_observations,
         market_bars=market_result.normalized_bars,
@@ -227,11 +271,12 @@ def populate_sec_and_market(
     )
     manifest = {
         **_jsonable(asdict(result)),
+        "mode": "sec_market",
         "start_quarter": f"{config.start_year}Q{config.start_quarter}",
         "end_quarter": f"{end_year}Q{end_quarter}",
         "market_start": market_start.isoformat(),
         "market_end": market_end.isoformat(),
-        "sec_company_count": len(company_manifest),
+        "total_unique_tickers_before_limit": total_unique_tickers,
         "unresolved_reason_counts": dict(sorted(reason_counts.items())),
     }
     (manifests_dir / "sec_market.json").write_text(
@@ -239,6 +284,21 @@ def populate_sec_and_market(
         encoding="utf-8",
     )
     return result
+
+
+def estimate_tiingo_requests(unique_tickers: int) -> dict[str, int]:
+    """Conservative lower-bound request estimate for the current backfill implementation."""
+    if unique_tickers < 0:
+        raise ValueError("unique_tickers must be >= 0")
+    metadata = unique_tickers
+    price_series = unique_tickers
+    benchmark = 1
+    return {
+        "metadata": metadata,
+        "price_series": price_series,
+        "benchmark": benchmark,
+        "minimum_total": metadata + price_series + benchmark,
+    }
 
 
 def latest_completed_quarter(day: date) -> tuple[int, int]:
@@ -265,6 +325,10 @@ def quarter_range(
     return tuple(values)
 
 
+def _normalized_ticker(value: str) -> str:
+    return value.strip().upper().replace(".", "-")
+
+
 def _jsonable(value):
     if isinstance(value, dict):
         return {str(key): _jsonable(item) for key, item in value.items()}
@@ -288,6 +352,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--market-end", type=date.fromisoformat)
     parser.add_argument("--max-unique-tickers", type=int)
     parser.add_argument(
+        "--sec-only",
+        action="store_true",
+        help="Populate SEC events/company universe only; do not require or call Tiingo.",
+    )
+    parser.add_argument(
         "--sec-user-agent",
         required=True,
         help="SEC-required application/contact identity, e.g. 'Stock-traiding name@email'.",
@@ -297,10 +366,6 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _parser().parse_args()
-    token = os.environ.get("TIINGO_API_TOKEN", "").strip()
-    if not token:
-        raise SystemExit("TIINGO_API_TOKEN environment variable is required")
-
     config = SecMarketPopulationConfig(
         data_root=args.data_root,
         start_year=args.start_year,
@@ -310,13 +375,28 @@ def main() -> None:
         market_start=args.market_start,
         market_end=args.market_end,
         max_unique_tickers=args.max_unique_tickers,
+        sec_only=args.sec_only,
     )
-    with SecClient(args.sec_user_agent) as sec_client, TiingoClient(token) as tiingo_client:
-        result = populate_sec_and_market(
-            config,
-            sec_client=sec_client,
-            tiingo_client=tiingo_client,
-        )
+
+    if args.sec_only:
+        with SecClient(args.sec_user_agent) as sec_client:
+            result = populate_sec_and_market(
+                config,
+                sec_client=sec_client,
+                tiingo_client=None,
+            )
+    else:
+        token = os.environ.get("TIINGO_API_TOKEN", "").strip()
+        if not token:
+            raise SystemExit(
+                "TIINGO_API_TOKEN environment variable is required unless --sec-only is used"
+            )
+        with SecClient(args.sec_user_agent) as sec_client, TiingoClient(token) as tiingo_client:
+            result = populate_sec_and_market(
+                config,
+                sec_client=sec_client,
+                tiingo_client=tiingo_client,
+            )
     print(json.dumps(_jsonable(asdict(result)), indent=2, sort_keys=True))
 
 

@@ -12,6 +12,9 @@ class SecClient:
 
     WWW_BASE = "https://www.sec.gov"
     DATA_BASE = "https://data.sec.gov"
+    INSIDER_DATASET_BASE = (
+        "https://www.sec.gov/files/structureddata/data/insider-transactions-data-sets"
+    )
 
     def __init__(
         self,
@@ -49,16 +52,13 @@ class SecClient:
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
 
-    @staticmethod
-    def quarterly_archive_url(year: int, quarter: int) -> str:
+    @classmethod
+    def quarterly_archive_url(cls, year: int, quarter: int) -> str:
         if year < 2006:
             raise ValueError("SEC insider quarterly data starts in 2006")
         if quarter not in {1, 2, 3, 4}:
             raise ValueError("quarter must be 1..4")
-        return (
-            "https://www.sec.gov/files/datastandardsinnovation/data/"
-            f"insider-transactions-data-sets/{year}q{quarter}_form345.zip"
-        )
+        return f"{cls.INSIDER_DATASET_BASE}/{year}q{quarter}_form345.zip"
 
     @staticmethod
     def submissions_url(cik: str) -> str:

@@ -33,8 +33,8 @@ def _raw(
     )
 
 
-def _event(raw: RawRecord) -> Event:
-    source_record_id = "filing-1:NONDERIV_TRANS:0"
+def _event(raw: RawRecord, *, index: int = 0) -> Event:
+    source_record_id = f"filing-1:NONDERIV_TRANS:{index}"
     return Event(
         event_id=deterministic_event_id(
             Source.SEC_EDGAR,
@@ -42,6 +42,7 @@ def _event(raw: RawRecord) -> Event:
             EventType.INSIDER_TRANSACTION,
         ),
         event_type=EventType.INSIDER_TRANSACTION,
+        event_index=index,
         company_id=company_id_from_sec_cik("12345"),
         actor_id="sec_owner_cik_0000054321",
         event_time=datetime(2026, 8, 8, 4, 0, tzinfo=timezone.utc),
@@ -144,3 +145,23 @@ def test_duckdb_event_store_is_idempotent_and_point_in_time_safe(tmp_path) -> No
 
     parquet = store.export_parquet(tmp_path / "normalized" / "events.parquet")
     assert parquet.exists()
+
+
+def test_duckdb_event_store_bulk_insert_is_idempotent(tmp_path) -> None:
+    pytest.importorskip("duckdb")
+
+    raw = _raw()
+    events = [_event(raw, index=index) for index in range(500)]
+    store = DuckDbEventStore(tmp_path / "events.duckdb")
+
+    store.put_many(events)
+    assert store.count() == 500
+
+    # A resumed historical import may replay an already committed quarter.
+    store.put_many(events)
+    assert store.count() == 500
+
+    restored = store.all_events()
+    assert len(restored) == 500
+    assert restored[0].first_tradable_time is None
+    assert restored[0].semantic is None

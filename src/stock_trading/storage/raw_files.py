@@ -72,7 +72,7 @@ class FileRawStore:
         if not matches:
             return None
 
-        _, metadata_path, metadata = max(matches, key=lambda item: item[0])
+        fetched_at, metadata_path, metadata = max(matches, key=lambda item: item[0])
         extension = _CONTENT_EXTENSIONS.get(metadata["content_type"], ".bin")
         content_path = metadata_path.with_name(f"{metadata['artifact_id']}{extension}")
         if not content_path.exists():
@@ -82,7 +82,7 @@ class FileRawStore:
         return RawRecord(
             source=source,
             source_record_id=metadata["source_record_id"],
-            fetched_at=metadata["fetched_at"],
+            fetched_at=fetched_at,
             content_type=metadata["content_type"],
             content=content,
             sha256=metadata["sha256"],

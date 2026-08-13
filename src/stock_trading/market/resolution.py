@@ -46,7 +46,7 @@ class ConservativeTiingoResolver:
     V1 requires all of the following:
     - the SEC and Tiingo symbols normalize to the same ticker;
     - the SEC observation date falls inside Tiingo's available date interval;
-    - the normalized company names match after conservative legal-suffix cleanup.
+    - the normalized company names match after conservative source-artifact cleanup.
 
     Anything else remains unresolved for later manual/permaTicker handling.
     """
@@ -93,9 +93,16 @@ class ConservativeTiingoResolver:
                 "observation_after_tiingo_history",
             )
 
-        if normalize_company_name(normalized_observation.issuer_name) != normalize_company_name(
-            tiingo_name
-        ):
+        observation_name = normalize_company_name(normalized_observation.issuer_name)
+        if observation_name in _UNAVAILABLE_COMPANY_NAMES:
+            return SecurityResolution(
+                ResolutionStatus.UNRESOLVED,
+                normalized_observation,
+                None,
+                "issuer_name_unavailable",
+            )
+
+        if observation_name != normalize_company_name(tiingo_name):
             return SecurityResolution(
                 ResolutionStatus.UNRESOLVED,
                 normalized_observation,
@@ -133,10 +140,37 @@ _LEGAL_SUFFIXES = {
     "PLC",
     "SA",
 }
+_SHARE_CLASS_WORDS = {"CLASS", "CL"}
+_SHARE_CLASS_VALUES = {"A", "B", "C"}
+_UNAVAILABLE_COMPANY_NAMES = {"", "UNKNOWN", "N A", "NA", "NOT AVAILABLE"}
+_SEC_TRAILING_MARKER = re.compile(r"\s*/(?:NEW|[A-Z]{2})/?\s*$", re.IGNORECASE)
 
 
 def normalize_company_name(value: str) -> str:
-    tokens = re.findall(r"[A-Z0-9]+", value.upper().replace("&", " AND "))
+    cleaned = value.upper().replace("&", " AND ").strip()
+
+    # SEC issuer names sometimes carry jurisdiction/reincorporation markers such
+    # as ``/DE/``, ``/MA/`` or ``/NEW``. They are source presentation metadata,
+    # not part of the legal company identity.
+    while True:
+        without_marker = _SEC_TRAILING_MARKER.sub("", cleaned).strip()
+        if without_marker == cleaned:
+            break
+        cleaned = without_marker
+
+    tokens = re.findall(r"[A-Z0-9]+", cleaned)
+
+    # Tiingo metadata can append a security-class descriptor to the company
+    # name (for example ``Alphabet Inc - Class A``). The ticker and date checks
+    # already identify the security; the descriptor should not make the company
+    # identity comparison fail.
+    if (
+        len(tokens) >= 2
+        and tokens[-2] in _SHARE_CLASS_WORDS
+        and tokens[-1] in _SHARE_CLASS_VALUES
+    ):
+        tokens = tokens[:-2]
+
     while tokens and tokens[-1] in _LEGAL_SUFFIXES:
         tokens.pop()
     return " ".join(tokens)

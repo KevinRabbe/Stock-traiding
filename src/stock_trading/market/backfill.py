@@ -160,6 +160,8 @@ class MarketBackfillService:
             else:
                 series_to_fetch[key] = (min(existing[0], fetch_start), max(existing[1], fetch_end))
 
+        resolutions = list(_promote_validated_company_aliases(resolutions))
+
         normalized_bars = 0
         downloaded_price_series = 0
         failed_price_series = 0
@@ -224,6 +226,50 @@ class MarketBackfillService:
             reused_price_responses=reused_price_responses,
             skipped_complete_price_series=skipped_complete_price_series,
         )
+
+
+def _promote_validated_company_aliases(
+    resolutions: list[SecurityResolution] | tuple[SecurityResolution, ...],
+) -> tuple[SecurityResolution, ...]:
+    """Accept a name variant only after the same SEC CIK+ticker has an exact match.
+
+    This is deliberately narrower than fuzzy name matching. A mismatched or
+    placeholder SEC issuer name is promoted only when another observation for
+    the same canonical SEC company and normalized ticker already passed the
+    ticker, date and company-name checks against the same Tiingo mapping.
+    """
+
+    validated = {
+        (resolution.mapping.company_id, resolution.mapping.ticker): resolution.mapping
+        for resolution in resolutions
+        if resolution.resolved and resolution.mapping is not None
+    }
+    promoted: list[SecurityResolution] = []
+    for resolution in resolutions:
+        if resolution.reason != "company_name_mismatch":
+            promoted.append(resolution)
+            continue
+
+        observation = resolution.observation
+        try:
+            ticker = normalize_tiingo_ticker(observation.ticker)
+        except ValueError:
+            promoted.append(resolution)
+            continue
+        mapping = validated.get((observation.company_id, ticker))
+        if mapping is None or not mapping.contains(observation.observed_date):
+            promoted.append(resolution)
+            continue
+
+        promoted.append(
+            SecurityResolution(
+                ResolutionStatus.RESOLVED,
+                observation,
+                mapping,
+                "sec_cik_ticker_validated_by_matching_alias",
+            )
+        )
+    return tuple(promoted)
 
 
 def _price_record_id(ticker: str, start: date, end: date) -> str:

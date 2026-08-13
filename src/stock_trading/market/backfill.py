@@ -107,7 +107,20 @@ class MarketBackfillService:
                     )
                     continue
                 self.raw_store.put(raw_metadata)
-                metadata = self.normalizer.parse_metadata(raw_metadata)
+                try:
+                    metadata = self.normalizer.parse_metadata(raw_metadata)
+                except (ValueError, KeyError, TypeError) as exc:
+                    reason = _metadata_parse_failure_reason(exc)
+                    metadata_failures[ticker] = reason
+                    resolutions.append(
+                        SecurityResolution(
+                            ResolutionStatus.UNRESOLVED,
+                            observation,
+                            None,
+                            reason,
+                        )
+                    )
+                    continue
                 metadata_cache[ticker] = metadata
 
             resolution = self.resolver.resolve(
@@ -171,3 +184,14 @@ def _http_failure_reason(prefix: str, exc: httpx.HTTPError) -> str:
     if isinstance(exc, httpx.HTTPStatusError):
         return f"{prefix}_http_{exc.response.status_code}"
     return f"{prefix}_request_error"
+
+
+def _metadata_parse_failure_reason(exc: Exception) -> str:
+    message = str(exc).lower()
+    if "no startdate" in message:
+        return "tiingo_metadata_missing_start_date"
+    if "no company name" in message:
+        return "tiingo_metadata_missing_company_name"
+    if isinstance(exc, KeyError) and "ticker" in message:
+        return "tiingo_metadata_missing_ticker"
+    return "tiingo_metadata_invalid"

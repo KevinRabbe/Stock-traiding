@@ -15,6 +15,10 @@ class SecClient:
     INSIDER_DATASET_BASE = (
         "https://www.sec.gov/files/structureddata/data/insider-transactions-data-sets"
     )
+    INSIDER_DATASET_FALLBACK_BASE = (
+        "https://www.sec.gov/files/datastandardsinnovation/data/"
+        "insider-transactions-data-sets"
+    )
 
     def __init__(
         self,
@@ -54,11 +58,19 @@ class SecClient:
 
     @classmethod
     def quarterly_archive_url(cls, year: int, quarter: int) -> str:
+        return cls.quarterly_archive_urls(year, quarter)[0]
+
+    @classmethod
+    def quarterly_archive_urls(cls, year: int, quarter: int) -> tuple[str, ...]:
         if year < 2006:
             raise ValueError("SEC insider quarterly data starts in 2006")
         if quarter not in {1, 2, 3, 4}:
             raise ValueError("quarter must be 1..4")
-        return f"{cls.INSIDER_DATASET_BASE}/{year}q{quarter}_form345.zip"
+        filename = f"{year}q{quarter}_form345.zip"
+        return (
+            f"{cls.INSIDER_DATASET_BASE}/{filename}",
+            f"{cls.INSIDER_DATASET_FALLBACK_BASE}/{filename}",
+        )
 
     @staticmethod
     def submissions_url(cik: str) -> str:
@@ -75,8 +87,23 @@ class SecClient:
         )
 
     def fetch_quarterly_archive(self, year: int, quarter: int) -> RawRecord:
-        url = self.quarterly_archive_url(year, quarter)
-        content = self._get(url).content
+        last_not_found: httpx.HTTPStatusError | None = None
+        response: httpx.Response | None = None
+        for url in self.quarterly_archive_urls(year, quarter):
+            try:
+                response = self._get(url)
+                break
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 404:
+                    raise
+                last_not_found = exc
+
+        if response is None:
+            if last_not_found is not None:
+                raise last_not_found
+            raise RuntimeError(f"SEC quarterly archive lookup failed for {year}Q{quarter}")
+
+        content = response.content
         return RawRecord(
             source=Source.SEC_QUARTERLY,
             source_record_id=f"{year}Q{quarter}",

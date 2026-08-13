@@ -1,0 +1,47 @@
+name: real-data readiness
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/readiness.yml
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+      TIINGO_API_TOKEN: ${{ secrets.TIINGO_API_TOKEN }}
+      LDA_API_TOKEN: ${{ secrets.LDA_API_TOKEN }}
+    steps:
+      - name: Report configured credential names
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## Real-data readiness"
+            echo
+            for name in SEC_USER_AGENT TIINGO_API_TOKEN LDA_API_TOKEN; do
+              if [ -n "${!name:-}" ]; then
+                echo "- ${name}: configured"
+              else
+                echo "- ${name}: missing"
+              fi
+            done
+            echo
+            echo "SEC_USER_AGENT is required for the SEC universe scan."
+            echo "TIINGO_API_TOKEN is required only for market backfill."
+            echo "LDA_API_TOKEN is optional; anonymous LDA access remains supported."
+          } | tee readiness.md
+          cat readiness.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload readiness report
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-data-readiness
+          path: readiness.md
+          retention-days: 7

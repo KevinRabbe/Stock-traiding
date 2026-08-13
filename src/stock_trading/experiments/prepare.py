@@ -16,6 +16,7 @@ from stock_trading.market import (
     MarketBackfillService,
     TiingoClient,
     TiingoNormalizer,
+    normalize_tiingo_ticker,
 )
 from stock_trading.sec import QuarterlyArchiveParser, SecClient
 from stock_trading.storage import DuckDbEventStore, FileRawStore
@@ -34,6 +35,7 @@ class SecMarketPopulationConfig:
     market_start: date | None = None
     market_end: date | None = None
     max_unique_tickers: int | None = None
+    tickers: tuple[str, ...] | None = None
     sec_only: bool = False
     refresh_sec_raw: bool = False
 
@@ -50,8 +52,12 @@ class SecMarketPopulationResult:
     resolved_companies: int
     unresolved_observations: int
     market_bars: int
+    downloaded_price_series: int
     failed_metadata_requests: int
     failed_price_series: int
+    reused_metadata_responses: int
+    reused_price_responses: int
+    skipped_complete_price_series: int
     benchmark_bars: int
     events_db: Path
     market_db: Path
@@ -71,6 +77,8 @@ def populate_sec_and_market(
         raise ValueError("start_quarter must be 1..4")
     if config.max_unique_tickers is not None and config.max_unique_tickers <= 0:
         raise ValueError("max_unique_tickers must be > 0")
+    if config.max_unique_tickers is not None and config.tickers:
+        raise ValueError("tickers and max_unique_tickers are mutually exclusive")
 
     today = date.today()
     default_end_year, default_end_quarter = latest_completed_quarter(today)
@@ -193,20 +201,17 @@ def populate_sec_and_market(
 
     all_observations = tuple(observations_by_key.values())
     total_unique_tickers = len({_normalized_ticker(item.ticker) for item in all_observations})
-    observations = all_observations
-    if config.max_unique_tickers is not None:
-        allowed_tickers = set(
-            sorted({_normalized_ticker(observation.ticker) for observation in observations})[
-                : config.max_unique_tickers
-            ]
-        )
-        observations = tuple(
-            observation
-            for observation in observations
-            if _normalized_ticker(observation.ticker) in allowed_tickers
-        )
+    (
+        observations,
+        selected_unique_tickers,
+        requested_tickers,
+        missing_requested_tickers,
+    ) = _select_observations(
+        all_observations,
+        max_unique_tickers=config.max_unique_tickers,
+        requested_tickers=config.tickers,
+    )
 
-    selected_unique_tickers = len({_normalized_ticker(item.ticker) for item in observations})
     market_start = config.market_start or date(config.start_year, 1, 1) - timedelta(days=400)
     market_end = config.market_end or today
     if market_end < market_start:
@@ -224,8 +229,12 @@ def populate_sec_and_market(
             resolved_companies=0,
             unresolved_observations=0,
             market_bars=0,
+            downloaded_price_series=0,
             failed_metadata_requests=0,
             failed_price_series=0,
+            reused_metadata_responses=0,
+            reused_price_responses=0,
+            skipped_complete_price_series=0,
             benchmark_bars=0,
             events_db=events_db,
             market_db=market_db,
@@ -237,6 +246,8 @@ def populate_sec_and_market(
             "start_quarter": f"{config.start_year}Q{config.start_quarter}",
             "end_quarter": f"{end_year}Q{end_quarter}",
             "total_unique_tickers_before_limit": total_unique_tickers,
+            "requested_tickers": list(requested_tickers),
+            "missing_requested_tickers": list(missing_requested_tickers),
             "estimated_tiingo_requests": estimate_tiingo_requests(selected_unique_tickers),
         }
         (manifests_dir / "sec_universe.json").write_text(
@@ -259,8 +270,11 @@ def populate_sec_and_market(
         end=market_end,
     )
 
-    benchmark_raw = tiingo_client.fetch_prices("SPY", market_start, market_end)
-    raw_store.put(benchmark_raw)
+    benchmark_record_id = f"prices:SPY:{market_start.isoformat()}:{market_end.isoformat()}"
+    benchmark_raw = raw_store.latest(Source.TIINGO, benchmark_record_id)
+    if benchmark_raw is None:
+        benchmark_raw = tiingo_client.fetch_prices("SPY", market_start, market_end)
+        raw_store.put(benchmark_raw)
     benchmark_bars = TiingoNormalizer().parse_prices(
         benchmark_raw,
         company_id=BENCHMARK_SPY_COMPANY_ID,
@@ -305,8 +319,12 @@ def populate_sec_and_market(
         resolved_companies=market_result.resolved_companies,
         unresolved_observations=market_result.unresolved_observations,
         market_bars=market_result.normalized_bars,
+        downloaded_price_series=market_result.downloaded_price_series,
         failed_metadata_requests=market_result.failed_metadata_requests,
         failed_price_series=market_result.failed_price_series,
+        reused_metadata_responses=market_result.reused_metadata_responses,
+        reused_price_responses=market_result.reused_price_responses,
+        skipped_complete_price_series=market_result.skipped_complete_price_series,
         benchmark_bars=len(benchmark_bars),
         events_db=events_db,
         market_db=market_db,
@@ -320,6 +338,8 @@ def populate_sec_and_market(
         "market_start": market_start.isoformat(),
         "market_end": market_end.isoformat(),
         "total_unique_tickers_before_limit": total_unique_tickers,
+        "requested_tickers": list(requested_tickers),
+        "missing_requested_tickers": list(missing_requested_tickers),
         "unresolved_reason_counts": dict(sorted(reason_counts.items())),
     }
     (manifests_dir / "sec_market.json").write_text(
@@ -329,8 +349,52 @@ def populate_sec_and_market(
     return result
 
 
+def _select_observations(
+    observations: tuple[IssuerObservation, ...],
+    *,
+    max_unique_tickers: int | None,
+    requested_tickers: tuple[str, ...] | None,
+) -> tuple[tuple[IssuerObservation, ...], int, tuple[str, ...], tuple[str, ...]]:
+    if max_unique_tickers is not None and requested_tickers:
+        raise ValueError("tickers and max_unique_tickers are mutually exclusive")
+
+    if requested_tickers:
+        requested = tuple(
+            dict.fromkeys(normalize_tiingo_ticker(ticker) for ticker in requested_tickers)
+        )
+        requested_set = set(requested)
+        selected: list[IssuerObservation] = []
+        present: set[str] = set()
+        for observation in observations:
+            try:
+                ticker = normalize_tiingo_ticker(observation.ticker)
+            except ValueError:
+                continue
+            if ticker in requested_set:
+                selected.append(observation)
+                present.add(ticker)
+        missing = tuple(ticker for ticker in requested if ticker not in present)
+        return tuple(selected), len(present), requested, missing
+
+    selected = observations
+    if max_unique_tickers is not None:
+        allowed_tickers = set(
+            sorted({_normalized_ticker(observation.ticker) for observation in observations})[
+                :max_unique_tickers
+            ]
+        )
+        selected = tuple(
+            observation
+            for observation in observations
+            if _normalized_ticker(observation.ticker) in allowed_tickers
+        )
+
+    selected_unique_tickers = len({_normalized_ticker(item.ticker) for item in selected})
+    return selected, selected_unique_tickers, (), ()
+
+
 def estimate_tiingo_requests(unique_tickers: int) -> dict[str, int]:
-    """Conservative lower-bound request estimate for the current backfill implementation."""
+    """Conservative lower-bound request estimate for a cold market backfill."""
     if unique_tickers < 0:
         raise ValueError("unique_tickers must be >= 0")
     metadata = unique_tickers
@@ -393,7 +457,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--end-quarter", type=int)
     parser.add_argument("--market-start", type=date.fromisoformat)
     parser.add_argument("--market-end", type=date.fromisoformat)
-    parser.add_argument("--max-unique-tickers", type=int)
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--max-unique-tickers", type=int)
+    selection.add_argument(
+        "--tickers",
+        nargs="+",
+        metavar="TICKER",
+        help="Populate only these explicit SEC-observed tickers, e.g. AAPL MSFT NVDA.",
+    )
     parser.add_argument(
         "--sec-only",
         action="store_true",
@@ -423,6 +494,7 @@ def main() -> None:
         market_start=args.market_start,
         market_end=args.market_end,
         max_unique_tickers=args.max_unique_tickers,
+        tickers=tuple(args.tickers) if args.tickers else None,
         sec_only=args.sec_only,
         refresh_sec_raw=args.refresh_sec_raw,
     )

@@ -17,3 +17,18 @@ jobs:
         run: python -m pip install -e ".[dev]"
       - name: Test
         run: pytest
+
+  windows-package-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: python -m pip install -e .
+      - name: Verify IANA timezone data
+        run: python -c "from zoneinfo import ZoneInfo; assert str(ZoneInfo('America/New_York')) == 'America/New_York'"
+      - name: Verify experiment CLI imports
+        run: python -m stock_trading.experiments.prepare --help

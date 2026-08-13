@@ -14,6 +14,7 @@ from .resolution import (
 )
 from .security import SecurityRegistry
 from .store import DuckDbMarketStore
+from .tiingo import normalize_tiingo_ticker
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +65,19 @@ class MarketBackfillService:
         failed_metadata_requests = 0
 
         for observation in observations:
-            ticker = observation.ticker.strip().upper().replace(".", "-")
+            try:
+                ticker = normalize_tiingo_ticker(observation.ticker)
+            except ValueError:
+                resolutions.append(
+                    SecurityResolution(
+                        ResolutionStatus.UNRESOLVED,
+                        observation,
+                        None,
+                        "unsupported_ticker",
+                    )
+                )
+                continue
+
             if ticker in metadata_failures:
                 resolutions.append(
                     SecurityResolution(

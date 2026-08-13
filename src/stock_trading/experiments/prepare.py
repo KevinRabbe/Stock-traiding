@@ -38,6 +38,7 @@ class SecMarketPopulationConfig:
 class SecMarketPopulationResult:
     quarters_downloaded: int
     insider_events: int
+    temporal_anomalies_skipped: int
     issuer_observations: int
     unique_tickers: int
     sec_companies: int
@@ -85,6 +86,7 @@ def populate_sec_and_market(
     company_manifest: dict[str, dict[str, object]] = {}
     quarters_downloaded = 0
     insider_events = 0
+    temporal_anomalies_skipped = 0
 
     for year, quarter in quarter_range(
         config.start_year,
@@ -97,7 +99,14 @@ def populate_sec_and_market(
         transactions = parser.parse(
             raw.content if isinstance(raw.content, bytes) else raw.content.encode("utf-8")
         )
-        events = parser.to_events(raw, ingested_at=raw.fetched_at)
+        temporal_anomalies_skipped += sum(
+            1 for transaction in transactions if parser.has_temporal_anomaly(transaction)
+        )
+        events = parser.to_events(
+            raw,
+            ingested_at=raw.fetched_at,
+            transactions=transactions,
+        )
         event_store.put_many(list(events))
         quarters_downloaded += 1
         insider_events += len(events)
@@ -177,6 +186,7 @@ def populate_sec_and_market(
         result = SecMarketPopulationResult(
             quarters_downloaded=quarters_downloaded,
             insider_events=insider_events,
+            temporal_anomalies_skipped=temporal_anomalies_skipped,
             issuer_observations=len(observations),
             unique_tickers=selected_unique_tickers,
             sec_companies=len(company_manifest),
@@ -256,6 +266,7 @@ def populate_sec_and_market(
     result = SecMarketPopulationResult(
         quarters_downloaded=quarters_downloaded,
         insider_events=insider_events,
+        temporal_anomalies_skipped=temporal_anomalies_skipped,
         issuer_observations=len(observations),
         unique_tickers=selected_unique_tickers,
         sec_companies=len(company_manifest),

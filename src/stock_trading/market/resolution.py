@@ -133,10 +133,30 @@ _LEGAL_SUFFIXES = {
     "PLC",
     "SA",
 }
+_SEC_TRAILING_QUALIFIER = re.compile(r"\s*/(?:[A-Z]{2}|NEW)/?\s*$", re.IGNORECASE)
+_SHARE_CLASS_MARKERS = {"CLASS", "CL"}
 
 
 def normalize_company_name(value: str) -> str:
-    tokens = re.findall(r"[A-Z0-9]+", value.upper().replace("&", " AND "))
+    """Normalize issuer names without erasing substantive corporate identity.
+
+    SEC flattened filings sometimes append presentation-only jurisdiction or
+    reincorporation markers such as ``/MA/`` or ``/NEW``. Market metadata may
+    also append a share-class descriptor (for example ``Class A``) to the
+    corporate issuer name. Neither should make an otherwise exact issuer-name
+    comparison fail once ticker and point-in-time date checks already agree.
+    """
+
+    cleaned = _SEC_TRAILING_QUALIFIER.sub("", value.strip())
+    tokens = re.findall(r"[A-Z0-9]+", cleaned.upper().replace("&", " AND "))
+
+    if (
+        len(tokens) >= 2
+        and tokens[-2] in _SHARE_CLASS_MARKERS
+        and 1 <= len(tokens[-1]) <= 3
+    ):
+        tokens = tokens[:-2]
+
     while tokens and tokens[-1] in _LEGAL_SUFFIXES:
         tokens.pop()
     return " ".join(tokens)

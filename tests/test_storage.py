@@ -40,6 +40,7 @@ def _event(raw: RawRecord, *, index: int = 0) -> Event:
             Source.SEC_EDGAR,
             source_record_id,
             EventType.INSIDER_TRANSACTION,
+            index,
         ),
         event_type=EventType.INSIDER_TRANSACTION,
         event_index=index,

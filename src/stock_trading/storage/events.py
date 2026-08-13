@@ -1,12 +1,66 @@
+import csv
 import json
 from datetime import datetime
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import TYPE_CHECKING
 
 from stock_trading.core import Event, EventType, Source, as_utc
 
 if TYPE_CHECKING:
     import duckdb
+
+
+_EVENT_COLUMNS = (
+    "event_id",
+    "event_type",
+    "company_id",
+    "actor_id",
+    "event_time",
+    "public_time",
+    "first_tradable_time",
+    "source",
+    "source_record_id",
+    "payload_json",
+    "semantic_json",
+    "raw_artifact_id",
+    "ingested_at",
+    "event_index",
+)
+_NULL_SENTINEL = "__STOCK_TRAIDING_NULL__"
+_BULK_INSERT_SQL = f"""
+    INSERT INTO events (
+        event_id, event_type, company_id, actor_id,
+        event_time, public_time, first_tradable_time,
+        source, source_record_id, payload_json, semantic_json,
+        raw_artifact_id, ingested_at, event_index
+    )
+    SELECT
+        event_id,
+        event_type,
+        company_id,
+        actor_id,
+        CAST(event_time AS TIMESTAMPTZ),
+        CAST(public_time AS TIMESTAMPTZ),
+        CAST(first_tradable_time AS TIMESTAMPTZ),
+        source,
+        source_record_id,
+        CAST(payload_json AS JSON),
+        CAST(semantic_json AS JSON),
+        raw_artifact_id,
+        CAST(ingested_at AS TIMESTAMPTZ),
+        CAST(event_index AS INTEGER)
+    FROM read_csv(
+        ?,
+        header = true,
+        delim = ',',
+        quote = '"',
+        escape = '"',
+        all_varchar = true,
+        nullstr = '{_NULL_SENTINEL}'
+    )
+    ON CONFLICT (event_id) DO NOTHING
+"""
 
 
 class DuckDbEventStore:
@@ -61,41 +115,59 @@ class DuckDbEventStore:
         self.put_many((event,))
 
     def put_many(self, events: tuple[Event, ...] | list[Event]) -> None:
+        """Insert events through DuckDB's vectorized CSV reader in one statement.
+
+        DuckDB explicitly warns against ``executemany`` for large ingestion. A
+        temporary CSV keeps this path dependency-light while allowing DuckDB to
+        parse and insert the quarter as a bulk relation. The target primary key
+        still makes reruns idempotent.
+        """
+
         if not events:
             return
-        rows = [
-            (
-                event.event_id,
-                event.event_type.value,
-                event.company_id,
-                event.actor_id,
-                event.event_time,
-                event.public_time,
-                event.first_tradable_time,
-                event.source.value,
-                event.source_record_id,
-                event.payload.model_dump_json(),
-                event.semantic.model_dump_json() if event.semantic is not None else None,
-                event.raw_artifact_id,
-                event.ingested_at,
-                event.event_index,
-            )
-            for event in events
-        ]
-        with self._connect() as connection:
-            connection.executemany(
-                """
-                INSERT INTO events (
-                    event_id, event_type, company_id, actor_id,
-                    event_time, public_time, first_tradable_time,
-                    source, source_record_id, payload_json, semantic_json,
-                    raw_artifact_id, ingested_at, event_index
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (event_id) DO NOTHING
-                """,
-                rows,
-            )
+
+        temporary_path: Path | None = None
+        try:
+            with NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                newline="",
+                suffix=".csv",
+                prefix="stock-traiding-events-",
+                delete=False,
+            ) as handle:
+                temporary_path = Path(handle.name)
+                writer = csv.writer(handle, lineterminator="\n")
+                writer.writerow(_EVENT_COLUMNS)
+                for event in events:
+                    writer.writerow(
+                        (
+                            event.event_id,
+                            event.event_type.value,
+                            _csv_value(event.company_id),
+                            _csv_value(event.actor_id),
+                            event.event_time.isoformat(),
+                            event.public_time.isoformat(),
+                            _csv_value(event.first_tradable_time),
+                            event.source.value,
+                            event.source_record_id,
+                            event.payload.model_dump_json(),
+                            _csv_value(
+                                event.semantic.model_dump_json()
+                                if event.semantic is not None
+                                else None
+                            ),
+                            event.raw_artifact_id,
+                            event.ingested_at.isoformat(),
+                            event.event_index,
+                        )
+                    )
+
+            with self._connect() as connection:
+                connection.execute(_BULK_INSERT_SQL, [str(temporary_path)])
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
 
     def public_rows(self, company_id: str, decision_time: datetime) -> list[dict]:
         cutoff = as_utc(decision_time)
@@ -149,6 +221,14 @@ class DuckDbEventStore:
                 f"TO '{escaped}' (FORMAT PARQUET)"
             )
         return path
+
+
+def _csv_value(value: object | None) -> object:
+    if value is None:
+        return _NULL_SENTINEL
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
 
 
 def _event_from_row(row: dict) -> Event:

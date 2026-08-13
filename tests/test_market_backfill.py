@@ -27,6 +27,17 @@ class _FakeTiingoClient:
             request = httpx.Request("GET", "https://api.tiingo.com/tiingo/daily/DEAD")
             response = httpx.Response(404, request=request)
             raise httpx.HTTPStatusError("not found", request=request, response=response)
+        if ticker == "NOSTART":
+            return _raw(
+                f"metadata:{ticker}",
+                {
+                    "ticker": ticker,
+                    "name": "No Start Corp",
+                    "exchangeCode": "NASDAQ",
+                    "startDate": None,
+                    "endDate": None,
+                },
+            )
         return _raw(
             f"metadata:{ticker}",
             {
@@ -62,7 +73,7 @@ class _FakeTiingoClient:
         )
 
 
-def test_market_backfill_continues_after_unavailable_metadata(tmp_path) -> None:
+def test_market_backfill_continues_after_unavailable_or_incomplete_metadata(tmp_path) -> None:
     pytest.importorskip("duckdb")
     service = MarketBackfillService(
         client=_FakeTiingoClient(),
@@ -74,6 +85,12 @@ def test_market_backfill_continues_after_unavailable_metadata(tmp_path) -> None:
             sec_cik="11111",
             issuer_name="Dead Corp",
             ticker="DEAD",
+            observed_date=date(2020, 1, 2),
+        ),
+        IssuerObservation(
+            sec_cik="33333",
+            issuer_name="No Start Corp",
+            ticker="NOSTART",
             observed_date=date(2020, 1, 2),
         ),
         IssuerObservation(
@@ -91,9 +108,10 @@ def test_market_backfill_continues_after_unavailable_metadata(tmp_path) -> None:
     )
 
     assert result.failed_metadata_requests == 1
-    assert result.unresolved_observations == 1
+    assert result.unresolved_observations == 2
     assert result.downloaded_price_series == 1
     assert result.failed_price_series == 0
     assert result.normalized_bars == 1
     reasons = [resolution.reason for resolution in result.resolutions]
     assert "tiingo_metadata_http_404" in reasons
+    assert "tiingo_metadata_missing_start_date" in reasons

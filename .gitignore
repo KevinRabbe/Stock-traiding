@@ -25,6 +25,7 @@ data/normalized/
 data/features/
 data/datasets/
 data/models/
+data/manifests/
 models/
 artifacts/
 

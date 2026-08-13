@@ -21,6 +21,10 @@ class FileRawStore:
 
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
+        self._source_indexes: dict[
+            Source,
+            dict[str, tuple[datetime, Path, dict[str, str]]],
+        ] = {}
 
     def put(self, record: RawRecord) -> Path:
         source_dir = self.root / record.source.value / record.fetched_at.strftime("%Y/%m")
@@ -42,37 +46,27 @@ class FileRawStore:
             "sha256": record.sha256,
         }
         self._write_metadata_once(metadata_path, metadata)
+        self._update_loaded_index(record.source, metadata_path)
         return content_path
 
     def latest(self, source: Source, source_record_id: str) -> RawRecord | None:
         """Return the newest immutable snapshot already stored for a source record.
 
-        This is intentionally keyed by the provider's source record id rather
-        than only the content hash so interrupted historical backfills can
-        resume without downloading completed source records again.
+        The per-source metadata index is built lazily once, then updated by
+        ``put``. This keeps resumable large backfills from rescanning every raw
+        metadata file for each ticker.
         """
 
-        source_root = self.root / source.value
-        if not source_root.exists():
+        index = self._source_indexes.get(source)
+        if index is None:
+            index = self._build_source_index(source)
+            self._source_indexes[source] = index
+
+        match = index.get(source_record_id)
+        if match is None:
             return None
 
-        matches: list[tuple[datetime, Path, dict[str, str]]] = []
-        for metadata_path in source_root.glob("**/*.metadata.json"):
-            metadata = self._read_metadata(metadata_path)
-            if metadata.get("source") != source.value:
-                continue
-            if metadata.get("source_record_id") != source_record_id:
-                continue
-            try:
-                fetched_at = datetime.fromisoformat(metadata["fetched_at"])
-            except (KeyError, ValueError) as exc:
-                raise ValueError(f"invalid raw artifact metadata at {metadata_path}") from exc
-            matches.append((fetched_at, metadata_path, metadata))
-
-        if not matches:
-            return None
-
-        fetched_at, metadata_path, metadata = max(matches, key=lambda item: item[0])
+        fetched_at, metadata_path, metadata = match
         extension = _CONTENT_EXTENSIONS.get(metadata["content_type"], ".bin")
         content_path = metadata_path.with_name(f"{metadata['artifact_id']}{extension}")
         if not content_path.exists():
@@ -87,6 +81,48 @@ class FileRawStore:
             content=content,
             sha256=metadata["sha256"],
         )
+
+    def _build_source_index(
+        self,
+        source: Source,
+    ) -> dict[str, tuple[datetime, Path, dict[str, str]]]:
+        source_root = self.root / source.value
+        if not source_root.exists():
+            return {}
+
+        index: dict[str, tuple[datetime, Path, dict[str, str]]] = {}
+        for metadata_path in source_root.glob("**/*.metadata.json"):
+            metadata = self._read_metadata(metadata_path)
+            if metadata.get("source") != source.value:
+                continue
+            source_record_id = metadata.get("source_record_id")
+            if not source_record_id:
+                continue
+            try:
+                fetched_at = datetime.fromisoformat(metadata["fetched_at"])
+            except (KeyError, ValueError) as exc:
+                raise ValueError(f"invalid raw artifact metadata at {metadata_path}") from exc
+
+            current = index.get(source_record_id)
+            if current is None or fetched_at > current[0]:
+                index[source_record_id] = (fetched_at, metadata_path, metadata)
+        return index
+
+    def _update_loaded_index(self, source: Source, metadata_path: Path) -> None:
+        index = self._source_indexes.get(source)
+        if index is None:
+            return
+
+        metadata = self._read_metadata(metadata_path)
+        try:
+            fetched_at = datetime.fromisoformat(metadata["fetched_at"])
+            source_record_id = metadata["source_record_id"]
+        except (KeyError, ValueError) as exc:
+            raise ValueError(f"invalid raw artifact metadata at {metadata_path}") from exc
+
+        current = index.get(source_record_id)
+        if current is None or fetched_at > current[0]:
+            index[source_record_id] = (fetched_at, metadata_path, metadata)
 
     @staticmethod
     def _read_metadata(path: Path) -> dict[str, str]:

@@ -166,6 +166,10 @@ def test_non_form4_xml_is_ignored() -> None:
 
 
 def test_sec_client_builds_current_official_paths_and_caps_rate() -> None:
+    assert SecClient.quarterly_archive_url(2012, 1) == (
+        "https://www.sec.gov/files/structureddata/data/"
+        "insider-transactions-data-sets/2012q1_form345.zip"
+    )
     assert SecClient.quarterly_archive_url(2026, 2).endswith("2026q2_form345.zip")
     assert SecClient.submissions_url("12345").endswith("CIK0000012345.json")
     assert SecClient.filing_document_url(

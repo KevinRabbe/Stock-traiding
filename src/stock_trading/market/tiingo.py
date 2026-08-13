@@ -76,10 +76,27 @@ class TiingoClient:
         return response
 
 
+_ALLOWED_TICKER_CHARACTERS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-")
+_BALANCED_TICKER_WRAPPERS = {'"': '"', "'": "'", "(": ")"}
+
+
 def normalize_tiingo_ticker(value: str) -> str:
-    ticker = value.strip().upper().replace(".", "-")
+    """Normalize narrow SEC presentation artifacts without guessing junk symbols."""
+    ticker = value.strip().upper()
     if not ticker:
         raise ValueError("ticker must not be empty")
-    if any(character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-" for character in ticker):
+
+    if len(ticker) >= 2 and _BALANCED_TICKER_WRAPPERS.get(ticker[0]) == ticker[-1]:
+        ticker = ticker[1:-1].strip()
+
+    if ticker.startswith(("'", "$")):
+        candidate = ticker[1:].strip().replace(".", "-")
+        if candidate and all(character in _ALLOWED_TICKER_CHARACTERS for character in candidate):
+            ticker = ticker[1:].strip()
+
+    ticker = ticker.replace(".", "-")
+    if not ticker:
+        raise ValueError("ticker must not be empty")
+    if any(character not in _ALLOWED_TICKER_CHARACTERS for character in ticker):
         raise ValueError("ticker contains unsupported characters")
     return ticker

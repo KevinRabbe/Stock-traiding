@@ -5,6 +5,8 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import date, timedelta
 from pathlib import Path
+from time import perf_counter
+from typing import Callable
 
 from stock_trading.core import Source
 from stock_trading.entities import company_id_from_sec_cik
@@ -61,6 +63,7 @@ def populate_sec_and_market(
     *,
     sec_client: SecClient,
     tiingo_client: TiingoClient | None,
+    progress: Callable[[str], None] | None = None,
 ) -> SecMarketPopulationResult:
     if config.start_year < 2006:
         raise ValueError("SEC quarterly insider history starts in 2006")
@@ -92,12 +95,16 @@ def populate_sec_and_market(
     insider_events = 0
     temporal_anomalies_skipped = 0
 
-    for year, quarter in quarter_range(
+    quarters = quarter_range(
         config.start_year,
         config.start_quarter,
         end_year,
         end_quarter,
-    ):
+    )
+    total_quarters = len(quarters)
+
+    for position, (year, quarter) in enumerate(quarters, start=1):
+        quarter_started = perf_counter()
         source_record_id = f"{year}Q{quarter}"
         raw = None
         if not config.refresh_sec_raw:
@@ -106,15 +113,18 @@ def populate_sec_and_market(
             raw = sec_client.fetch_quarterly_archive(year, quarter)
             raw_store.put(raw)
             quarters_downloaded += 1
+            raw_mode = "downloaded"
         else:
             quarters_reused += 1
+            raw_mode = "reused"
 
         transactions = parser.parse(
             raw.content if isinstance(raw.content, bytes) else raw.content.encode("utf-8")
         )
-        temporal_anomalies_skipped += sum(
+        quarter_anomalies = sum(
             1 for transaction in transactions if parser.has_temporal_anomaly(transaction)
         )
+        temporal_anomalies_skipped += quarter_anomalies
         events = parser.to_events(
             raw,
             ingested_at=raw.fetched_at,
@@ -154,6 +164,14 @@ def populate_sec_and_market(
             existing = observations_by_key.get(key)
             if existing is None or observation.observed_date < existing.observed_date:
                 observations_by_key[key] = observation
+
+        if progress is not None:
+            elapsed = perf_counter() - quarter_started
+            progress(
+                f"[{position:02d}/{total_quarters:02d}] {year}Q{quarter} | {raw_mode} | "
+                f"transactions={len(transactions):,} events={len(events):,} "
+                f"anomalies={quarter_anomalies:,} | {elapsed:.1f}s"
+            )
 
     manifests_dir = data_root / "manifests"
     manifests_dir.mkdir(parents=True, exist_ok=True)
@@ -415,6 +433,7 @@ def main() -> None:
                 config,
                 sec_client=sec_client,
                 tiingo_client=None,
+                progress=print,
             )
     else:
         token = os.environ.get("TIINGO_API_TOKEN", "").strip()
@@ -427,6 +446,7 @@ def main() -> None:
                 config,
                 sec_client=sec_client,
                 tiingo_client=tiingo_client,
+                progress=print,
             )
     print(json.dumps(_jsonable(asdict(result)), indent=2, sort_keys=True))
 

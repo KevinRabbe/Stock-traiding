@@ -30,5 +30,7 @@ jobs:
         run: python -m pip install -e .
       - name: Verify IANA timezone data
         run: python -c "from zoneinfo import ZoneInfo; assert str(ZoneInfo('America/New_York')) == 'America/New_York'"
+      - name: Verify current SEC archive URL
+        run: python -c "from stock_trading.sec import SecClient; assert SecClient.quarterly_archive_url(2012, 1) == 'https://www.sec.gov/files/structureddata/data/insider-transactions-data-sets/2012q1_form345.zip'"
       - name: Verify experiment CLI imports
-        run: python -m stock_trading.experiments.prepare --help
+        run: python -W error -m stock_trading.experiments.prepare --help

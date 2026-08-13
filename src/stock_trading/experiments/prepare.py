@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from datetime import date, timedelta
 from pathlib import Path
 
+from stock_trading.core import Source
 from stock_trading.entities import company_id_from_sec_cik
 from stock_trading.market import (
     DuckDbMarketStore,
@@ -32,11 +33,13 @@ class SecMarketPopulationConfig:
     market_end: date | None = None
     max_unique_tickers: int | None = None
     sec_only: bool = False
+    refresh_sec_raw: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class SecMarketPopulationResult:
     quarters_downloaded: int
+    quarters_reused: int
     insider_events: int
     temporal_anomalies_skipped: int
     issuer_observations: int
@@ -85,6 +88,7 @@ def populate_sec_and_market(
     observations_by_key: dict[tuple[str, str, str], IssuerObservation] = {}
     company_manifest: dict[str, dict[str, object]] = {}
     quarters_downloaded = 0
+    quarters_reused = 0
     insider_events = 0
     temporal_anomalies_skipped = 0
 
@@ -94,8 +98,17 @@ def populate_sec_and_market(
         end_year,
         end_quarter,
     ):
-        raw = sec_client.fetch_quarterly_archive(year, quarter)
-        raw_store.put(raw)
+        source_record_id = f"{year}Q{quarter}"
+        raw = None
+        if not config.refresh_sec_raw:
+            raw = raw_store.latest(Source.SEC_QUARTERLY, source_record_id)
+        if raw is None:
+            raw = sec_client.fetch_quarterly_archive(year, quarter)
+            raw_store.put(raw)
+            quarters_downloaded += 1
+        else:
+            quarters_reused += 1
+
         transactions = parser.parse(
             raw.content if isinstance(raw.content, bytes) else raw.content.encode("utf-8")
         )
@@ -108,7 +121,6 @@ def populate_sec_and_market(
             transactions=transactions,
         )
         event_store.put_many(list(events))
-        quarters_downloaded += 1
         insider_events += len(events)
 
         for transaction in transactions:
@@ -185,6 +197,7 @@ def populate_sec_and_market(
     if config.sec_only:
         result = SecMarketPopulationResult(
             quarters_downloaded=quarters_downloaded,
+            quarters_reused=quarters_reused,
             insider_events=insider_events,
             temporal_anomalies_skipped=temporal_anomalies_skipped,
             issuer_observations=len(observations),
@@ -265,6 +278,7 @@ def populate_sec_and_market(
     )
     result = SecMarketPopulationResult(
         quarters_downloaded=quarters_downloaded,
+        quarters_reused=quarters_reused,
         insider_events=insider_events,
         temporal_anomalies_skipped=temporal_anomalies_skipped,
         issuer_observations=len(observations),
@@ -368,6 +382,11 @@ def _parser() -> argparse.ArgumentParser:
         help="Populate SEC events/company universe only; do not require or call Tiingo.",
     )
     parser.add_argument(
+        "--refresh-sec-raw",
+        action="store_true",
+        help="Refetch SEC quarterly ZIPs even when immutable raw snapshots are already cached.",
+    )
+    parser.add_argument(
         "--sec-user-agent",
         required=True,
         help="SEC-required application/contact identity, e.g. 'Stock-traiding name@email'.",
@@ -387,6 +406,7 @@ def main() -> None:
         market_end=args.market_end,
         max_unique_tickers=args.max_unique_tickers,
         sec_only=args.sec_only,
+        refresh_sec_raw=args.refresh_sec_raw,
     )
 
     if args.sec_only:

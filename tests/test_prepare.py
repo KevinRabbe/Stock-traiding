@@ -48,6 +48,19 @@ def test_sec_only_cli_does_not_require_market_arguments() -> None:
     assert args.sec_only is True
     assert args.start_year == 2012
     assert args.max_unique_tickers is None
+    assert args.refresh_sec_raw is False
+
+
+def test_sec_raw_cache_can_be_explicitly_refreshed() -> None:
+    args = _parser().parse_args(
+        [
+            "--sec-only",
+            "--refresh-sec-raw",
+            "--sec-user-agent",
+            "Stock-traiding test@example.com",
+        ]
+    )
+    assert args.refresh_sec_raw is True
 
 
 def test_training_dataset_rejects_non_20_day_target() -> None:

@@ -1,8 +1,75 @@
+import csv
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 from .models import MarketBar
+
+
+_MARKET_COLUMNS = (
+    "company_id",
+    "ticker",
+    "date",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "adj_open",
+    "adj_high",
+    "adj_low",
+    "adj_close",
+    "adj_volume",
+    "dividend_cash",
+    "split_factor",
+)
+_BULK_UPSERT_SQL = """
+    INSERT INTO market_daily (
+        company_id, ticker, date,
+        open, high, low, close, volume,
+        adj_open, adj_high, adj_low, adj_close, adj_volume,
+        dividend_cash, split_factor
+    )
+    SELECT
+        company_id,
+        ticker,
+        CAST(date AS DATE),
+        CAST(open AS DOUBLE),
+        CAST(high AS DOUBLE),
+        CAST(low AS DOUBLE),
+        CAST(close AS DOUBLE),
+        CAST(volume AS DOUBLE),
+        CAST(adj_open AS DOUBLE),
+        CAST(adj_high AS DOUBLE),
+        CAST(adj_low AS DOUBLE),
+        CAST(adj_close AS DOUBLE),
+        CAST(adj_volume AS DOUBLE),
+        CAST(dividend_cash AS DOUBLE),
+        CAST(split_factor AS DOUBLE)
+    FROM read_csv(
+        ?,
+        header = true,
+        delim = ',',
+        quote = '"',
+        escape = '"',
+        all_varchar = true
+    )
+    ON CONFLICT (company_id, date) DO UPDATE SET
+        ticker = EXCLUDED.ticker,
+        open = EXCLUDED.open,
+        high = EXCLUDED.high,
+        low = EXCLUDED.low,
+        close = EXCLUDED.close,
+        volume = EXCLUDED.volume,
+        adj_open = EXCLUDED.adj_open,
+        adj_high = EXCLUDED.adj_high,
+        adj_low = EXCLUDED.adj_low,
+        adj_close = EXCLUDED.adj_close,
+        adj_volume = EXCLUDED.adj_volume,
+        dividend_cash = EXCLUDED.dividend_cash,
+        split_factor = EXCLUDED.split_factor
+"""
 
 
 class DuckDbMarketStore:
@@ -49,49 +116,50 @@ class DuckDbMarketStore:
             )
 
     def put_many(self, bars: tuple[MarketBar, ...] | list[MarketBar]) -> None:
+        """Upsert market bars through DuckDB's vectorized CSV reader."""
+
         if not bars:
             return
-        rows = [
-            (
-                bar.company_id,
-                bar.ticker,
-                bar.date,
-                float(bar.open),
-                float(bar.high),
-                float(bar.low),
-                float(bar.close),
-                float(bar.volume),
-                float(bar.adj_open),
-                float(bar.adj_high),
-                float(bar.adj_low),
-                float(bar.adj_close),
-                float(bar.adj_volume),
-                float(bar.dividend_cash),
-                float(bar.split_factor),
-            )
-            for bar in bars
-        ]
-        with self._connect() as connection:
-            connection.executemany(
-                """
-                INSERT INTO market_daily VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (company_id, date) DO UPDATE SET
-                    ticker = EXCLUDED.ticker,
-                    open = EXCLUDED.open,
-                    high = EXCLUDED.high,
-                    low = EXCLUDED.low,
-                    close = EXCLUDED.close,
-                    volume = EXCLUDED.volume,
-                    adj_open = EXCLUDED.adj_open,
-                    adj_high = EXCLUDED.adj_high,
-                    adj_low = EXCLUDED.adj_low,
-                    adj_close = EXCLUDED.adj_close,
-                    adj_volume = EXCLUDED.adj_volume,
-                    dividend_cash = EXCLUDED.dividend_cash,
-                    split_factor = EXCLUDED.split_factor
-                """,
-                rows,
-            )
+
+        temporary_path: Path | None = None
+        try:
+            with NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                newline="",
+                suffix=".csv",
+                prefix="stock-traiding-market-",
+                delete=False,
+            ) as handle:
+                temporary_path = Path(handle.name)
+                writer = csv.writer(handle, lineterminator="\n")
+                writer.writerow(_MARKET_COLUMNS)
+                for bar in bars:
+                    writer.writerow(
+                        (
+                            bar.company_id,
+                            bar.ticker,
+                            bar.date.isoformat(),
+                            str(bar.open),
+                            str(bar.high),
+                            str(bar.low),
+                            str(bar.close),
+                            str(bar.volume),
+                            str(bar.adj_open),
+                            str(bar.adj_high),
+                            str(bar.adj_low),
+                            str(bar.adj_close),
+                            str(bar.adj_volume),
+                            str(bar.dividend_cash),
+                            str(bar.split_factor),
+                        )
+                    )
+
+            with self._connect() as connection:
+                connection.execute(_BULK_UPSERT_SQL, [str(temporary_path)])
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
 
     def date_bounds(self, company_id: str, ticker: str) -> tuple[date, date] | None:
         """Return stored first/last trading dates for one verified security mapping."""

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 
 import httpx
 
@@ -27,6 +27,9 @@ class MarketBackfillResult:
     normalized_bars: int
     failed_metadata_requests: int = 0
     failed_price_series: int = 0
+    reused_metadata_responses: int = 0
+    reused_price_responses: int = 0
+    skipped_complete_price_series: int = 0
 
 
 class MarketBackfillService:
@@ -64,6 +67,7 @@ class MarketBackfillService:
         resolutions: list[SecurityResolution] = []
         series_to_fetch: dict[tuple[str, str], tuple[date, date]] = {}
         failed_metadata_requests = 0
+        reused_metadata_responses = 0
 
         for observation in observations:
             try:
@@ -111,6 +115,8 @@ class MarketBackfillService:
                         )
                         continue
                     self.raw_store.put(raw_metadata)
+                else:
+                    reused_metadata_responses += 1
 
                 try:
                     metadata = self.normalizer.parse_metadata(raw_metadata)
@@ -157,27 +163,53 @@ class MarketBackfillService:
         normalized_bars = 0
         downloaded_price_series = 0
         failed_price_series = 0
-        for (company_id, ticker), (fetch_start, fetch_end) in sorted(series_to_fetch.items()):
-            price_record_id = (
-                f"prices:{ticker}:{fetch_start.isoformat()}:{fetch_end.isoformat()}"
-            )
-            raw_prices = self.raw_store.latest(Source.TIINGO, price_record_id)
-            if raw_prices is None:
-                try:
-                    raw_prices = self.client.fetch_prices(ticker, fetch_start, fetch_end)
-                except httpx.HTTPError:
-                    failed_price_series += 1
-                    continue
-                self.raw_store.put(raw_prices)
-                downloaded_price_series += 1
+        reused_price_responses = 0
+        skipped_complete_price_series = 0
 
-            bars = self.normalizer.parse_prices(
-                raw_prices,
-                company_id=company_id,
-                ticker=ticker,
+        for (company_id, ticker), (fetch_start, fetch_end) in sorted(series_to_fetch.items()):
+            full_record_id = _price_record_id(ticker, fetch_start, fetch_end)
+            raw_full = self.raw_store.latest(Source.TIINGO, full_record_id)
+            if raw_full is not None:
+                reused_price_responses += 1
+                bars = self.normalizer.parse_prices(
+                    raw_full,
+                    company_id=company_id,
+                    ticker=ticker,
+                )
+                self.market_store.put_many(bars)
+            else:
+                stored_bounds = self.market_store.date_bounds(company_id, ticker)
+                missing_ranges = _missing_date_ranges(fetch_start, fetch_end, stored_bounds)
+                if not missing_ranges:
+                    skipped_complete_price_series += 1
+
+                for range_start, range_end in missing_ranges:
+                    record_id = _price_record_id(ticker, range_start, range_end)
+                    raw_prices = self.raw_store.latest(Source.TIINGO, record_id)
+                    if raw_prices is None:
+                        try:
+                            raw_prices = self.client.fetch_prices(ticker, range_start, range_end)
+                        except httpx.HTTPError:
+                            failed_price_series += 1
+                            continue
+                        self.raw_store.put(raw_prices)
+                        downloaded_price_series += 1
+                    else:
+                        reused_price_responses += 1
+
+                    bars = self.normalizer.parse_prices(
+                        raw_prices,
+                        company_id=company_id,
+                        ticker=ticker,
+                    )
+                    self.market_store.put_many(bars)
+
+            normalized_bars += self.market_store.count_bars(
+                company_id,
+                ticker,
+                fetch_start,
+                fetch_end,
             )
-            self.market_store.put_many(bars)
-            normalized_bars += len(bars)
 
         unresolved = sum(1 for resolution in resolutions if not resolution.resolved)
         return MarketBackfillResult(
@@ -188,7 +220,35 @@ class MarketBackfillService:
             normalized_bars=normalized_bars,
             failed_metadata_requests=failed_metadata_requests,
             failed_price_series=failed_price_series,
+            reused_metadata_responses=reused_metadata_responses,
+            reused_price_responses=reused_price_responses,
+            skipped_complete_price_series=skipped_complete_price_series,
         )
+
+
+def _price_record_id(ticker: str, start: date, end: date) -> str:
+    return f"prices:{ticker}:{start.isoformat()}:{end.isoformat()}"
+
+
+def _missing_date_ranges(
+    start: date,
+    end: date,
+    stored_bounds: tuple[date, date] | None,
+) -> tuple[tuple[date, date], ...]:
+    if stored_bounds is None:
+        return ((start, end),)
+
+    stored_start, stored_end = stored_bounds
+    missing: list[tuple[date, date]] = []
+    if start < stored_start:
+        prefix_end = min(end, stored_start - timedelta(days=1))
+        if start <= prefix_end:
+            missing.append((start, prefix_end))
+    if end > stored_end:
+        suffix_start = max(start, stored_end + timedelta(days=1))
+        if suffix_start <= end:
+            missing.append((suffix_start, end))
+    return tuple(missing)
 
 
 def _http_failure_reason(prefix: str, exc: httpx.HTTPError) -> str:

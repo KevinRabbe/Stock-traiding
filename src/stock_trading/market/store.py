@@ -93,6 +93,42 @@ class DuckDbMarketStore:
                 rows,
             )
 
+    def date_bounds(self, company_id: str, ticker: str) -> tuple[date, date] | None:
+        """Return stored first/last trading dates for one verified security mapping."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT MIN(date), MAX(date)
+                FROM market_daily
+                WHERE company_id = ? AND ticker = ?
+                """,
+                [company_id, ticker],
+            ).fetchone()
+        if row is None or row[0] is None or row[1] is None:
+            return None
+        return row[0], row[1]
+
+    def count_bars(
+        self,
+        company_id: str,
+        ticker: str,
+        start_day: date,
+        end_day: date,
+    ) -> int:
+        if end_day < start_day:
+            raise ValueError("end_day must be >= start_day")
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM market_daily
+                WHERE company_id = ? AND ticker = ? AND date BETWEEN ? AND ?
+                """,
+                [company_id, ticker, start_day, end_day],
+            ).fetchone()
+        return int(row[0]) if row is not None else 0
+
     def next_bar_after(self, company_id: str, day: date) -> MarketBar | None:
         with self._connect() as connection:
             cursor = connection.execute(

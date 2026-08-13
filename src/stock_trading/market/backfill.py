@@ -3,6 +3,7 @@ from datetime import date
 
 import httpx
 
+from stock_trading.core import Source
 from stock_trading.storage import FileRawStore
 
 from .normalize import TiingoNormalizer
@@ -91,22 +92,26 @@ class MarketBackfillService:
 
             metadata = metadata_cache.get(ticker)
             if metadata is None:
-                try:
-                    raw_metadata = self.client.fetch_metadata(ticker)
-                except httpx.HTTPError as exc:
-                    failed_metadata_requests += 1
-                    reason = _http_failure_reason("tiingo_metadata", exc)
-                    metadata_failures[ticker] = reason
-                    resolutions.append(
-                        SecurityResolution(
-                            ResolutionStatus.UNRESOLVED,
-                            observation,
-                            None,
-                            reason,
+                metadata_record_id = f"metadata:{ticker}"
+                raw_metadata = self.raw_store.latest(Source.TIINGO, metadata_record_id)
+                if raw_metadata is None:
+                    try:
+                        raw_metadata = self.client.fetch_metadata(ticker)
+                    except httpx.HTTPError as exc:
+                        failed_metadata_requests += 1
+                        reason = _http_failure_reason("tiingo_metadata", exc)
+                        metadata_failures[ticker] = reason
+                        resolutions.append(
+                            SecurityResolution(
+                                ResolutionStatus.UNRESOLVED,
+                                observation,
+                                None,
+                                reason,
+                            )
                         )
-                    )
-                    continue
-                self.raw_store.put(raw_metadata)
+                        continue
+                    self.raw_store.put(raw_metadata)
+
                 try:
                     metadata = self.normalizer.parse_metadata(raw_metadata)
                 except (ValueError, KeyError, TypeError) as exc:
@@ -153,19 +158,25 @@ class MarketBackfillService:
         downloaded_price_series = 0
         failed_price_series = 0
         for (company_id, ticker), (fetch_start, fetch_end) in sorted(series_to_fetch.items()):
-            try:
-                raw_prices = self.client.fetch_prices(ticker, fetch_start, fetch_end)
-            except httpx.HTTPError:
-                failed_price_series += 1
-                continue
-            self.raw_store.put(raw_prices)
+            price_record_id = (
+                f"prices:{ticker}:{fetch_start.isoformat()}:{fetch_end.isoformat()}"
+            )
+            raw_prices = self.raw_store.latest(Source.TIINGO, price_record_id)
+            if raw_prices is None:
+                try:
+                    raw_prices = self.client.fetch_prices(ticker, fetch_start, fetch_end)
+                except httpx.HTTPError:
+                    failed_price_series += 1
+                    continue
+                self.raw_store.put(raw_prices)
+                downloaded_price_series += 1
+
             bars = self.normalizer.parse_prices(
                 raw_prices,
                 company_id=company_id,
                 ticker=ticker,
             )
             self.market_store.put_many(bars)
-            downloaded_price_series += 1
             normalized_bars += len(bars)
 
         unresolved = sum(1 for resolution in resolutions if not resolution.resolved)

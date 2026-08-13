@@ -136,20 +136,36 @@ class QuarterlyArchiveParser:
 
         return tuple(parsed)
 
+    @staticmethod
+    def has_temporal_anomaly(transaction: QuarterlyTransaction) -> bool:
+        """Return True when an as-filed row implies disclosure before the transaction."""
+        return transaction.transaction_date > transaction.filing_date
+
     def to_events(
         self,
         archive: RawRecord,
         *,
         ingested_at: datetime,
+        transactions: tuple[QuarterlyTransaction, ...] | None = None,
     ) -> tuple[Event, ...]:
         if archive.source is not Source.SEC_QUARTERLY:
             raise ValueError("quarterly archive RawRecord must use Source.SEC_QUARTERLY")
 
         ingested_at = as_utc(ingested_at)
         events: list[Event] = []
-        for transaction in self.parse(
-            archive.content if isinstance(archive.content, bytes) else archive.content.encode("utf-8")
-        ):
+        parsed_transactions = transactions
+        if parsed_transactions is None:
+            parsed_transactions = self.parse(
+                archive.content if isinstance(archive.content, bytes) else archive.content.encode("utf-8")
+            )
+
+        for transaction in parsed_transactions:
+            # Preserve the source row in the immutable raw archive, but never
+            # manufacture a canonical point-in-time event from impossible
+            # chronology. In particular, do not clamp or rewrite either date.
+            if self.has_temporal_anomaly(transaction):
+                continue
+
             source_record_id = (
                 f"{transaction.accession_number}:NONDERIV_TRANS:{transaction.transaction_key}"
             )

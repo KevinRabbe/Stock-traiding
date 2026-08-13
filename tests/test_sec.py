@@ -37,6 +37,27 @@ def _quarterly_zip() -> bytes:
     return buffer.getvalue()
 
 
+def _quarterly_zip_with_temporal_anomaly() -> bytes:
+    submission = (
+        "ACCESSION_NUMBER\tFILING_DATE\tPERIOD_OF_REPORT\tDOCUMENT_TYPE\tISSUERCIK\t"
+        "ISSUERNAME\tISSUERTRADINGSYMBOL\tAFF10B5ONE\n"
+        "0000000001-12-000001\t03-JAN-2012\t03-JAN-2012\t4\t12345\tExample Corp\tEXM\t\n"
+    )
+    transactions = (
+        "ACCESSION_NUMBER\tNONDERIV_TRANS_SK\tSECURITY_TITLE\tTRANS_DATE\tTRANS_CODE\t"
+        "TRANS_SHARES\tTRANS_PRICEPERSHARE\tTRANS_ACQUIRED_DISP_CD\t"
+        "SHRS_OWND_FOLWNG_TRANS\tDIRECT_INDIRECT_OWNERSHIP\tNATURE_OF_OWNERSHIP\n"
+        "0000000001-12-000001\t101\tCommon Stock\t04-JAN-2012\tP\t100\t10.50\tA\t1100\tD\t\n"
+    )
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("SUBMISSION.tsv", submission)
+        archive.writestr("REPORTINGOWNER.tsv", "ACCESSION_NUMBER\tRPTOWNERCIK\tRPTOWNERNAME\n")
+        archive.writestr("NONDERIV_TRANS.tsv", transactions)
+    return buffer.getvalue()
+
+
 def _raw(source: Source, record_id: str, content: bytes | str, content_type: str) -> RawRecord:
     return RawRecord(
         source=source,
@@ -77,6 +98,23 @@ def test_quarterly_parser_filters_to_form4_and_builds_safe_event() -> None:
     assert event.payload.value == Decimal("1050.00")
     assert event.payload.is_10b5_1 is True
     assert event.public_time.date().isoformat() == "2026-08-11"  # UTC conversion of ET day-end
+
+
+def test_quarterly_parser_skips_temporally_impossible_as_filed_row() -> None:
+    archive = _raw(
+        Source.SEC_QUARTERLY,
+        "2012Q1",
+        _quarterly_zip_with_temporal_anomaly(),
+        "application/zip",
+    )
+    parser = QuarterlyArchiveParser()
+    rows = parser.parse(archive.content)
+
+    assert len(rows) == 1
+    assert rows[0].transaction_date.isoformat() == "2012-01-04"
+    assert rows[0].filing_date.isoformat() == "2012-01-03"
+    assert parser.has_temporal_anomaly(rows[0]) is True
+    assert parser.to_events(archive, ingested_at=archive.fetched_at, transactions=rows) == ()
 
 
 def test_quarterly_parser_rejects_naive_ingestion_timestamp() -> None:

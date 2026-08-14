@@ -27,6 +27,13 @@ from stock_trading.ml.walk_forward import (
 from stock_trading.storage import DuckDbEventStore
 
 
+_MODEL_EVENT_TYPES = (
+    EventType.INSIDER_TRANSACTION,
+    EventType.GOVERNMENT_CONTRACT,
+    EventType.LOBBYING_ACTIVITY,
+)
+
+
 @dataclass(frozen=True, slots=True)
 class HistoricalExperimentConfig:
     events_db: Path
@@ -45,6 +52,8 @@ class HistoricalExperimentConfig:
 
 @dataclass(frozen=True, slots=True)
 class HistoricalExperimentResult:
+    source_event_count: int
+    mapped_company_count: int
     event_count: int
     trigger_count: int
     training_row_count: int
@@ -63,22 +72,29 @@ def run_historical_experiment(
 
     event_store = DuckDbEventStore(config.events_db)
     market_store = DuckDbMarketStore(config.market_db)
-    all_events = event_store.all_events()
+    source_event_count = event_store.count()
+    mapped_company_ids = _mapped_company_ids(market_store)
+    if not mapped_company_ids:
+        raise ValueError("market store has no verified company-to-security mappings")
+
+    # The normalized event database can contain millions of companies/events while
+    # a development market universe may contain only tens or hundreds of verified
+    # securities. Load only event families used by the model for companies that
+    # have an explicit market mapping. This is both faster and safer than probing
+    # unresolved companies one event at a time.
+    all_events = event_store.all_events(
+        company_ids=mapped_company_ids,
+        event_types=_MODEL_EVENT_TYPES,
+    )
     trigger_events = tuple(
         event
         for event in all_events
-        if event.company_id
-        and event.event_type
-        in {
-            EventType.INSIDER_TRANSACTION,
-            EventType.GOVERNMENT_CONTRACT,
-            EventType.LOBBYING_ACTIVITY,
-        }
+        if event.company_id and event.event_type in _MODEL_EVENT_TYPES
     )
 
     snapshot_builder = CandidateSnapshotBuilder(
         market_store,
-        benchmark_company_id=config.benchmark_company_id,
+        benchmark_security_id=config.benchmark_company_id,
         feature_lookback_bars=config.feature_lookback_bars,
         label_horizons=(1, 5, config.target_horizon, 60),
     )
@@ -150,16 +166,18 @@ def run_historical_experiment(
 
     summary = summarize_walk_forward(walk_results)
     report = {
-        "schema_version": "historical-lightgbm-v1",
+        "schema_version": "historical-lightgbm-v2",
         "inputs": {
             "events_db": str(config.events_db),
             "events_db_sha256": _sha256_file(config.events_db),
             "market_db": str(config.market_db),
             "market_db_sha256": _sha256_file(config.market_db),
-            "benchmark_company_id": config.benchmark_company_id,
+            "benchmark_security_id": config.benchmark_company_id,
         },
         "dataset": {
-            "event_count": len(all_events),
+            "source_event_count": source_event_count,
+            "mapped_company_count": len(mapped_company_ids),
+            "selected_event_count": len(all_events),
             "trigger_count": len(trigger_events),
             "training_row_count": len(rows),
             "decision_start": min(row.decision_time for row in rows).isoformat(),
@@ -178,12 +196,22 @@ def run_historical_experiment(
     )
 
     return HistoricalExperimentResult(
+        source_event_count=source_event_count,
+        mapped_company_count=len(mapped_company_ids),
         event_count=len(all_events),
         trigger_count=len(trigger_events),
         training_row_count=len(rows),
         tested_years=tuple(split.test_year for split in splits),
         output_dir=output,
     )
+
+
+def _mapped_company_ids(market_store: DuckDbMarketStore) -> tuple[str, ...]:
+    with market_store._connect() as connection:
+        rows = connection.execute(
+            "SELECT DISTINCT company_id FROM company_security_map ORDER BY company_id"
+        ).fetchall()
+    return tuple(str(row[0]) for row in rows)
 
 
 def _write_training_rows(path: Path, rows: tuple[TrainingRow, ...]) -> None:
@@ -223,7 +251,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--events-db", type=Path, required=True)
     parser.add_argument("--market-db", type=Path, required=True)
-    parser.add_argument("--benchmark-company-id", required=True)
+    parser.add_argument(
+        "--benchmark-security-id",
+        "--benchmark-company-id",
+        dest="benchmark_security_id",
+        required=True,
+        help="Security ID for the benchmark series (legacy --benchmark-company-id is accepted).",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--first-test-year", type=int)
     parser.add_argument("--min-train-rows", type=int, default=100)
@@ -241,7 +275,7 @@ def main() -> None:
         HistoricalExperimentConfig(
             events_db=args.events_db,
             market_db=args.market_db,
-            benchmark_company_id=args.benchmark_company_id,
+            benchmark_company_id=args.benchmark_security_id,
             output_dir=args.output_dir,
             first_test_year=args.first_test_year,
             min_train_rows=args.min_train_rows,
@@ -257,7 +291,9 @@ def main() -> None:
     print(
         json.dumps(
             {
-                "event_count": result.event_count,
+                "source_event_count": result.source_event_count,
+                "mapped_company_count": result.mapped_company_count,
+                "selected_event_count": result.event_count,
                 "trigger_count": result.trigger_count,
                 "training_row_count": result.training_row_count,
                 "tested_years": result.tested_years,

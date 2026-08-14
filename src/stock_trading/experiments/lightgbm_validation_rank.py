@@ -1,6 +1,7 @@
 import argparse
 import json
 from dataclasses import asdict, dataclass
+from math import isfinite
 from pathlib import Path
 
 import numpy as np
@@ -157,6 +158,7 @@ def run_validation_rank_backtest(
         "walk_forward_summary": asdict(summary),
         "years": year_reports,
     }
+    payload = _json_safe(payload)
     output_path = root / "validation_rank_backtest.json"
     output_path.write_text(
         json.dumps(payload, indent=2, sort_keys=True, allow_nan=False),
@@ -184,6 +186,16 @@ def _scored_candidates(rows, predictions) -> tuple[ScoredCandidate, ...]:
         )
         for index, row in enumerate(rows)
     )
+
+
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, float) and not isfinite(value):
+        return None
+    return value
 
 
 def _parser() -> argparse.ArgumentParser:

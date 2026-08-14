@@ -19,10 +19,10 @@ from stock_trading.market import (
 )
 from stock_trading.storage import FileRawStore
 
-from .sec_snapshot import SecUniverseSnapshot, load_sec_universe_snapshot
+from .sec_snapshot import load_sec_universe_snapshot
 
 
-BENCHMARK_SPY_COMPANY_ID = "benchmark_spy"
+BENCHMARK_SPY_SECURITY_ID = "benchmark_spy"
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +35,7 @@ class MarketOnlyResult:
     issuer_observations: int
     unique_tickers: int
     resolved_companies: int
+    resolved_securities: int
     unresolved_observations: int
     market_bars: int
     downloaded_price_series: int
@@ -45,7 +46,7 @@ class MarketOnlyResult:
     skipped_complete_price_series: int
     benchmark_bars: int
     market_db: Path
-    benchmark_company_id: str
+    benchmark_security_id: str
 
 
 def populate_market_from_snapshot(
@@ -95,7 +96,7 @@ def populate_market_from_snapshot(
         raw_store.put(benchmark_raw)
     benchmark_bars = TiingoNormalizer().parse_prices(
         benchmark_raw,
-        company_id=BENCHMARK_SPY_COMPANY_ID,
+        security_id=BENCHMARK_SPY_SECURITY_ID,
         ticker="SPY",
     )
     market_store.put_many(benchmark_bars)
@@ -137,6 +138,7 @@ def populate_market_from_snapshot(
         issuer_observations=len(observations),
         unique_tickers=selected_unique_tickers,
         resolved_companies=market_result.resolved_companies,
+        resolved_securities=market_result.resolved_securities,
         unresolved_observations=market_result.unresolved_observations,
         market_bars=market_result.normalized_bars,
         downloaded_price_series=market_result.downloaded_price_series,
@@ -147,7 +149,7 @@ def populate_market_from_snapshot(
         skipped_complete_price_series=market_result.skipped_complete_price_series,
         benchmark_bars=len(benchmark_bars),
         market_db=market_db,
-        benchmark_company_id=BENCHMARK_SPY_COMPANY_ID,
+        benchmark_security_id=BENCHMARK_SPY_SECURITY_ID,
     )
     manifest = {
         **_jsonable(asdict(result)),

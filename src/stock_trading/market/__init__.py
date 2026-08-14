@@ -14,6 +14,7 @@ from .resolution import (
     ResolutionStatus,
     SecurityResolution,
     normalize_company_name,
+    tiingo_security_id,
 )
 from .security import SecurityRegistry
 from .snapshots import CandidateSnapshot, CandidateSnapshotBuilder, LabeledCandidate
@@ -46,4 +47,5 @@ __all__ = [
     "next_open_timestamp",
     "normalize_company_name",
     "normalize_tiingo_ticker",
+    "tiingo_security_id",
 ]

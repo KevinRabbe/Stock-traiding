@@ -8,6 +8,7 @@ import numpy as np
 from stock_trading.core import Event, EventType
 from stock_trading.extraction import ALLOWED_TOPICS
 from stock_trading.features import (
+    CompanyEventIndex,
     build_alternative_features,
     build_congress_features,
     build_insider_features,
@@ -97,15 +98,18 @@ class TrainingDatasetBuilder:
         all_events: Iterable[Event],
     ) -> tuple[TrainingRow, ...]:
         event_history = tuple(all_events)
-        history_by_company: dict[str, tuple[Event, ...]] = {}
         grouped_history: dict[str, list[Event]] = {}
         for event in event_history:
             if event.company_id:
                 grouped_history.setdefault(event.company_id, []).append(event)
-        for company_id, events in grouped_history.items():
-            history_by_company[company_id] = tuple(
-                sorted(events, key=lambda event: (event.public_time, event.event_id))
-            )
+
+        # Build each legal company's temporal index exactly once. All rolling
+        # insider/contract/lobbying feature windows below then use binary-search
+        # slices instead of sorting and scanning the full history per opportunity.
+        history_by_company = {
+            company_id: CompanyEventIndex(company_id, events)
+            for company_id, events in grouped_history.items()
+        }
 
         # Quarterly Form 4 data can contain several transaction lines from one
         # filing. Collapse those raw triggers before touching the market store.
@@ -186,7 +190,9 @@ class TrainingDatasetBuilder:
                 continue
 
             company_id = session_key[0]
-            company_history = history_by_company.get(company_id, ())
+            company_history = history_by_company.get(company_id)
+            if company_history is None:
+                raise ValueError(f"missing temporal event index for {company_id}")
             features = {
                 **snapshot.market_features,
                 **build_insider_features(

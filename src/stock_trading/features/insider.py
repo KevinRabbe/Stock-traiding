@@ -1,30 +1,23 @@
 from collections.abc import Iterable
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from stock_trading.core import Event, EventType, TradeDirection, as_utc
 
+from .event_index import CompanyEventIndex, ensure_company_event_index
+
 
 def build_insider_features(
-    events: Iterable[Event],
+    events: Iterable[Event] | CompanyEventIndex,
     *,
     company_id: str,
     decision_time: datetime,
 ) -> dict[str, float | None]:
     decision = as_utc(decision_time)
-    insiders = sorted(
-        (
-            event
-            for event in events
-            if event.company_id == company_id
-            and event.event_type is EventType.INSIDER_TRANSACTION
-            and event.public_time <= decision
-        ),
-        key=lambda event: event.public_time,
-    )
+    index = ensure_company_event_index(events, company_id=company_id)
 
     features: dict[str, float | None] = {}
     for days in (7, 30, 90):
-        recent = _within(insiders, decision, days)
+        recent = index.within(EventType.INSIDER_TRANSACTION, decision, days)
         buys = [event for event in recent if _is_discretionary_buy(event)]
         sells = [event for event in recent if _is_discretionary_sell(event)]
         open_market_buys = [event for event in buys if _is_open_market_purchase(event)]
@@ -43,7 +36,7 @@ def build_insider_features(
             len({event.actor_id for event in buys if event.actor_id})
         )
 
-    recent_90 = _within(insiders, decision, 90)
+    recent_90 = index.within(EventType.INSIDER_TRANSACTION, decision, 90)
     buys_90 = [event for event in recent_90 if _is_discretionary_buy(event)]
     sells_90 = [event for event in recent_90 if _is_discretionary_sell(event)]
     features["insider.ceo_buy_count_90d"] = float(
@@ -86,11 +79,6 @@ def build_insider_features(
     )
     features["insider.cluster_buy_30d"] = float(features["insider.unique_buyers_30d"] >= 2)
     return features
-
-
-def _within(events: Iterable[Event], decision: datetime, days: int) -> list[Event]:
-    cutoff = decision - timedelta(days=days)
-    return [event for event in events if cutoff < event.public_time <= decision]
 
 
 def _is_discretionary_buy(event: Event) -> bool:
@@ -136,4 +124,4 @@ def _role_contains(event: Event, *needles: str) -> bool:
 def _days_since(event: Event | None, decision: datetime) -> float | None:
     if event is None:
         return None
-    return (decision - event.public_time).total_seconds() / 86400.0
+    return (decision - as_utc(event.public_time)).total_seconds() / 86400.0

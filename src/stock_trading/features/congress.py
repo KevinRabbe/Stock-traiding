@@ -1,11 +1,13 @@
 from collections.abc import Iterable
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from stock_trading.core import Event, EventType, TradeDirection, as_utc
 
+from .event_index import CompanyEventIndex, ensure_company_event_index
+
 
 def build_congress_features(
-    events: Iterable[Event],
+    events: Iterable[Event] | CompanyEventIndex,
     *,
     company_id: str,
     decision_time: datetime,
@@ -23,17 +25,8 @@ def build_congress_features(
         return {"congress.enabled": 0.0}
 
     decision = as_utc(decision_time)
-    trades = sorted(
-        (
-            event
-            for event in events
-            if event.company_id == company_id
-            and event.event_type is EventType.CONGRESS_TRANSACTION
-            and event.public_time <= decision
-        ),
-        key=lambda event: event.public_time,
-    )
-    recent_90 = _within(trades, decision, 90)
+    index = ensure_company_event_index(events, company_id=company_id)
+    recent_90 = index.within(EventType.CONGRESS_TRANSACTION, decision, 90)
     buys = [event for event in recent_90 if event.payload.direction is TradeDirection.BUY]
 
     leadership_buys = [
@@ -71,11 +64,6 @@ def build_congress_features(
             _conditional_buy_weight(event) for event in buys
         ),
     }
-
-
-def _within(events: Iterable[Event], decision: datetime, days: int) -> list[Event]:
-    cutoff = decision - timedelta(days=days)
-    return [event for event in events if cutoff < event.public_time <= decision]
 
 
 def _avg_optional(events: Iterable[Event], attribute: str) -> float | None:

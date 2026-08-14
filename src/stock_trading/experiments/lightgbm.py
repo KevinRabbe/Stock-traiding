@@ -56,6 +56,7 @@ class HistoricalExperimentResult:
     mapped_company_count: int
     event_count: int
     trigger_count: int
+    aggregated_trigger_event_count: int
     training_row_count: int
     tested_years: tuple[int, ...]
     output_dir: Path
@@ -107,9 +108,14 @@ def run_historical_experiment(
     if not rows:
         raise ValueError("no mature model-ready rows could be built from the supplied stores")
 
+    aggregated_trigger_event_count = sum(len(row.trigger_event_ids) for row in rows)
+    max_triggers_per_opportunity = max(len(row.trigger_event_ids) for row in rows)
+    mean_triggers_per_opportunity = aggregated_trigger_event_count / len(rows)
+
     _write_training_rows(output / "training_rows.jsonl", rows)
 
-    trainer = LightGbmTrainer(training_config)
+    effective_training_config = training_config or LightGbmTrainingConfig()
+    trainer = LightGbmTrainer(effective_training_config)
     backtester = FixedAllocationBacktester(backtest_config)
     splits = annual_walk_forward_splits(
         rows,
@@ -166,7 +172,7 @@ def run_historical_experiment(
 
     summary = summarize_walk_forward(walk_results)
     report = {
-        "schema_version": "historical-lightgbm-v2",
+        "schema_version": "historical-lightgbm-v3-opportunity",
         "inputs": {
             "events_db": str(config.events_db),
             "events_db_sha256": _sha256_file(config.events_db),
@@ -175,17 +181,21 @@ def run_historical_experiment(
             "benchmark_security_id": config.benchmark_company_id,
         },
         "dataset": {
+            "row_unit": "company_execution_session_opportunity",
             "source_event_count": source_event_count,
             "mapped_company_count": len(mapped_company_ids),
             "selected_event_count": len(all_events),
-            "trigger_count": len(trigger_events),
+            "raw_trigger_event_count": len(trigger_events),
+            "aggregated_trigger_event_count": aggregated_trigger_event_count,
             "training_row_count": len(rows),
+            "mean_trigger_events_per_opportunity": mean_triggers_per_opportunity,
+            "max_trigger_events_per_opportunity": max_triggers_per_opportunity,
             "decision_start": min(row.decision_time for row in rows).isoformat(),
             "decision_end": max(row.decision_time for row in rows).isoformat(),
             "positive_alpha_threshold": config.positive_alpha_threshold,
             "target_horizon": config.target_horizon,
         },
-        "training_config": _jsonable(training_config or LightGbmTrainingConfig()),
+        "training_config": _jsonable(effective_training_config),
         "backtest_config": _jsonable(backtest_config or BacktestConfig()),
         "walk_forward_summary": _jsonable(summary),
         "years": year_reports,
@@ -200,6 +210,7 @@ def run_historical_experiment(
         mapped_company_count=len(mapped_company_ids),
         event_count=len(all_events),
         trigger_count=len(trigger_events),
+        aggregated_trigger_event_count=aggregated_trigger_event_count,
         training_row_count=len(rows),
         tested_years=tuple(split.test_year for split in splits),
         output_dir=output,
@@ -294,7 +305,9 @@ def main() -> None:
                 "source_event_count": result.source_event_count,
                 "mapped_company_count": result.mapped_company_count,
                 "selected_event_count": result.event_count,
-                "trigger_count": result.trigger_count,
+                "raw_trigger_event_count": result.trigger_count,
+                "aggregated_trigger_event_count": result.aggregated_trigger_event_count,
+                "opportunity_row_count": result.training_row_count,
                 "training_row_count": result.training_row_count,
                 "tested_years": result.tested_years,
                 "output_dir": str(result.output_dir),

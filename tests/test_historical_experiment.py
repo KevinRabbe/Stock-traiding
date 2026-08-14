@@ -12,7 +12,7 @@ from stock_trading.core import (
     deterministic_event_id,
 )
 from stock_trading.experiments import HistoricalExperimentConfig, run_historical_experiment
-from stock_trading.market import DuckDbMarketStore, MarketBar
+from stock_trading.market import DuckDbMarketStore, MarketBar, SecurityMapping
 from stock_trading.ml import LightGbmTrainingConfig
 from stock_trading.storage import DuckDbEventStore
 
@@ -25,7 +25,7 @@ def _business_days(start: date, end: date):
         day += timedelta(days=1)
 
 
-def _series(company_id: str, ticker: str, daily_return: float) -> list[MarketBar]:
+def _series(security_id: str, ticker: str, daily_return: float) -> list[MarketBar]:
     price = 100.0
     bars: list[MarketBar] = []
     for day in _business_days(date(2021, 1, 4), date(2024, 8, 30)):
@@ -35,7 +35,7 @@ def _series(company_id: str, ticker: str, daily_return: float) -> list[MarketBar
         low = min(open_price, close_price) * 0.995
         bars.append(
             MarketBar(
-                company_id=company_id,
+                security_id=security_id,
                 ticker=ticker,
                 date=day,
                 open=Decimal(str(open_price)),
@@ -100,17 +100,26 @@ def test_historical_experiment_runs_from_stores_to_report(tmp_path) -> None:
     market_store.put_many(_series(benchmark_id, "SPY", 0.0005))
 
     companies = (
-        ("cmp_fast", "FAST", 0.0020, "5000"),
-        ("cmp_mid", "MID", 0.0010, "3000"),
-        ("cmp_flat", "FLAT", 0.0000, "2000"),
-        ("cmp_down", "DOWN", -0.0010, "1000"),
+        ("cmp_fast", "security_fast", "FAST", 0.0020, "5000"),
+        ("cmp_mid", "security_mid", "MID", 0.0010, "3000"),
+        ("cmp_flat", "security_flat", "FLAT", 0.0000, "2000"),
+        ("cmp_down", "security_down", "DOWN", -0.0010, "1000"),
     )
-    for company_id, ticker, daily_return, _value in companies:
-        market_store.put_many(_series(company_id, ticker, daily_return))
+    for company_id, security_id, ticker, daily_return, _value in companies:
+        market_store.register_mapping(
+            SecurityMapping(
+                company_id=company_id,
+                security_id=security_id,
+                ticker=ticker,
+                valid_from=date(2021, 1, 1),
+                valid_to=None,
+            )
+        )
+        market_store.put_many(_series(security_id, ticker, daily_return))
 
     events = []
     for year in (2022, 2023, 2024):
-        for index, (company_id, _ticker, _return, value) in enumerate(companies):
+        for index, (company_id, _security_id, _ticker, _return, value) in enumerate(companies):
             events.append(_event(company_id, year, index, value))
     event_store.put_many(events)
 

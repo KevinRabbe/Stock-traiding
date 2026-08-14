@@ -32,9 +32,23 @@ class TiingoNormalizer:
         self,
         raw: RawRecord,
         *,
-        company_id: str,
+        security_id: str | None = None,
         ticker: str,
+        company_id: str | None = None,
     ) -> tuple[MarketBar, ...]:
+        """Normalize a Tiingo series onto security identity.
+
+        ``company_id`` is accepted temporarily as a compatibility alias for old
+        benchmark/setup call sites. It is interpreted only as the security ID;
+        no company attribution is written into ``MarketBar``.
+        """
+
+        if security_id is not None and company_id is not None and security_id != company_id:
+            raise ValueError("security_id and legacy company_id alias disagree")
+        resolved_security_id = security_id or company_id
+        if not resolved_security_id:
+            raise ValueError("security_id is required")
+
         self._require_tiingo_json(raw)
         normalized_ticker = normalize_tiingo_ticker(ticker)
         payload = json.loads(self._text(raw))
@@ -45,7 +59,7 @@ class TiingoNormalizer:
         for row in payload:
             bars.append(
                 MarketBar(
-                    company_id=company_id,
+                    security_id=resolved_security_id,
                     ticker=normalized_ticker,
                     date=date.fromisoformat(str(row["date"])[:10]),
                     open=self._decimal(row["open"]),

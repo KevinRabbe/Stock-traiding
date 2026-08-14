@@ -22,6 +22,7 @@ from .tiingo import normalize_tiingo_ticker
 class MarketBackfillResult:
     resolutions: tuple[SecurityResolution, ...]
     resolved_companies: int
+    resolved_securities: int
     unresolved_observations: int
     downloaded_price_series: int
     normalized_bars: int
@@ -33,7 +34,7 @@ class MarketBackfillResult:
 
 
 class MarketBackfillService:
-    """Resolve SEC issuer observations and backfill only verified Tiingo histories."""
+    """Resolve SEC issuers to securities and backfill verified Tiingo histories."""
 
     def __init__(
         self,
@@ -144,31 +145,28 @@ class MarketBackfillService:
             resolutions.append(resolution)
 
         resolutions = list(_promote_validated_company_aliases(resolutions))
-        conflicted_tickers = _find_ticker_overlap_conflicts(
-            resolutions,
-            existing_mappings=self.security_registry.mappings(),
-        )
-        if conflicted_tickers:
-            resolutions = list(
-                _mark_ticker_overlap_conflicts(
-                    resolutions,
-                    conflicted_tickers=conflicted_tickers,
-                )
-            )
 
         series_to_fetch: dict[tuple[str, str], tuple[date, date]] = {}
+        resolved_company_ids: set[str] = set()
         for resolution in resolutions:
             if not resolution.resolved or resolution.mapping is None:
                 continue
 
-            self.security_registry.add(resolution.mapping)
             mapping = resolution.mapping
+            # The registry protects ticker->security identity. Different legal
+            # companies are explicitly allowed to reference the same security.
+            self.security_registry.add(mapping)
+            self.market_store.register_mapping(mapping)
+            # Preserve already-downloaded data from pre-migration databases.
+            self.market_store.migrate_legacy_company_bars(mapping)
+
             fetch_start = max(start, mapping.valid_from)
             fetch_end = min(end, mapping.valid_to) if mapping.valid_to is not None else end
             if fetch_end < fetch_start:
                 continue
 
-            key = (mapping.company_id, mapping.ticker)
+            resolved_company_ids.add(mapping.company_id)
+            key = (mapping.security_id, mapping.ticker)
             existing = series_to_fetch.get(key)
             if existing is None:
                 series_to_fetch[key] = (fetch_start, fetch_end)
@@ -181,19 +179,19 @@ class MarketBackfillService:
         reused_price_responses = 0
         skipped_complete_price_series = 0
 
-        for (company_id, ticker), (fetch_start, fetch_end) in sorted(series_to_fetch.items()):
+        for (security_id, ticker), (fetch_start, fetch_end) in sorted(series_to_fetch.items()):
             full_record_id = _price_record_id(ticker, fetch_start, fetch_end)
             raw_full = self.raw_store.latest(Source.TIINGO, full_record_id)
             if raw_full is not None:
                 reused_price_responses += 1
                 bars = self.normalizer.parse_prices(
                     raw_full,
-                    company_id=company_id,
+                    security_id=security_id,
                     ticker=ticker,
                 )
                 self.market_store.put_many(bars)
             else:
-                stored_bounds = self.market_store.date_bounds(company_id, ticker)
+                stored_bounds = self.market_store.date_bounds(security_id, ticker)
                 missing_ranges = _missing_date_ranges(fetch_start, fetch_end, stored_bounds)
                 if not missing_ranges:
                     skipped_complete_price_series += 1
@@ -214,13 +212,13 @@ class MarketBackfillService:
 
                     bars = self.normalizer.parse_prices(
                         raw_prices,
-                        company_id=company_id,
+                        security_id=security_id,
                         ticker=ticker,
                     )
                     self.market_store.put_many(bars)
 
             normalized_bars += self.market_store.count_bars(
-                company_id,
+                security_id,
                 ticker,
                 fetch_start,
                 fetch_end,
@@ -229,7 +227,8 @@ class MarketBackfillService:
         unresolved = sum(1 for resolution in resolutions if not resolution.resolved)
         return MarketBackfillResult(
             resolutions=tuple(resolutions),
-            resolved_companies=len(series_to_fetch),
+            resolved_companies=len(resolved_company_ids),
+            resolved_securities=len(series_to_fetch),
             unresolved_observations=unresolved,
             downloaded_price_series=downloaded_price_series,
             normalized_bars=normalized_bars,
@@ -249,7 +248,7 @@ def _promote_validated_company_aliases(
     This is deliberately narrower than fuzzy name matching. A mismatched or
     placeholder SEC issuer name is promoted only when another observation for
     the same canonical SEC company and normalized ticker already passed the
-    ticker, date and company-name checks against the same Tiingo mapping.
+    ticker, date and company-name checks against the same Tiingo security.
     """
 
     validated = {
@@ -283,62 +282,6 @@ def _promote_validated_company_aliases(
             )
         )
     return tuple(promoted)
-
-
-def _find_ticker_overlap_conflicts(
-    resolutions: list[SecurityResolution] | tuple[SecurityResolution, ...],
-    *,
-    existing_mappings,
-) -> frozenset[str]:
-    """Return tickers whose point-in-time ownership cannot be resolved safely.
-
-    Tiingo metadata describes a ticker-level history. If two different SEC CIKs
-    both resolve that same Tiingo interval, assigning the bars to either company
-    would leak one issuer's history into another. Detect the conflict before any
-    market data is fetched and fail closed for the entire ticker.
-    """
-
-    scratch = SecurityRegistry()
-    for mapping in existing_mappings:
-        scratch.add(mapping)
-
-    conflicted: set[str] = set()
-    for resolution in resolutions:
-        if not resolution.resolved or resolution.mapping is None:
-            continue
-        ticker = normalize_tiingo_ticker(resolution.mapping.ticker)
-        try:
-            scratch.add(resolution.mapping)
-        except ValueError as exc:
-            if "overlaps multiple companies" not in str(exc):
-                raise
-            conflicted.add(ticker)
-    return frozenset(conflicted)
-
-
-def _mark_ticker_overlap_conflicts(
-    resolutions: list[SecurityResolution] | tuple[SecurityResolution, ...],
-    *,
-    conflicted_tickers: frozenset[str],
-) -> tuple[SecurityResolution, ...]:
-    marked: list[SecurityResolution] = []
-    for resolution in resolutions:
-        if not resolution.resolved or resolution.mapping is None:
-            marked.append(resolution)
-            continue
-        ticker = normalize_tiingo_ticker(resolution.mapping.ticker)
-        if ticker not in conflicted_tickers:
-            marked.append(resolution)
-            continue
-        marked.append(
-            SecurityResolution(
-                ResolutionStatus.UNRESOLVED,
-                resolution.observation,
-                None,
-                "ticker_overlap_conflict",
-            )
-        )
-    return tuple(marked)
 
 
 def _price_record_id(ticker: str, start: date, end: date) -> str:

@@ -15,6 +15,7 @@ class CandidateSnapshot:
 
     event_id: str
     company_id: str
+    security_id: str
     decision_time: datetime
     decision_market_date: date
     execution_date: date
@@ -36,7 +37,8 @@ class CandidateSnapshotBuilder:
         self,
         market_store: DuckDbMarketStore,
         *,
-        benchmark_company_id: str,
+        benchmark_security_id: str | None = None,
+        benchmark_company_id: str | None = None,
         feature_lookback_bars: int = 260,
         label_horizons: tuple[int, ...] = (1, 5, 20, 60),
     ) -> None:
@@ -44,9 +46,21 @@ class CandidateSnapshotBuilder:
             raise ValueError("feature_lookback_bars must be > 0")
         if not label_horizons or any(horizon <= 0 for horizon in label_horizons):
             raise ValueError("label_horizons must contain positive horizons")
+        if (
+            benchmark_security_id is not None
+            and benchmark_company_id is not None
+            and benchmark_security_id != benchmark_company_id
+        ):
+            raise ValueError("benchmark security aliases disagree")
+        benchmark = benchmark_security_id or benchmark_company_id
+        if not benchmark:
+            raise ValueError("benchmark_security_id is required")
 
         self.market_store = market_store
-        self.benchmark_company_id = benchmark_company_id
+        self.benchmark_security_id = benchmark
+        # Compatibility attribute for the existing experiment config. It is no
+        # longer interpreted as a legal-company identity.
+        self.benchmark_company_id = benchmark
         self.feature_lookback_bars = feature_lookback_bars
         self.label_horizons = tuple(sorted(set(label_horizons)))
 
@@ -55,35 +69,40 @@ class CandidateSnapshotBuilder:
             raise ValueError("candidate event must have a canonical company_id")
 
         decision_day = decision_market_date(event.public_time)
-        execution_bar = self.market_store.next_bar_after(event.company_id, decision_day)
+        security_id = self.market_store.security_for_company(event.company_id, decision_day)
+        if security_id is None:
+            raise ValueError("no verified security mapping available for candidate company")
+
+        execution_bar = self.market_store.next_bar_after(security_id, decision_day)
         if execution_bar is None:
-            raise ValueError("no future market bar available for candidate company")
+            raise ValueError("no future market bar available for candidate security")
 
         benchmark_execution_bar = self.market_store.bar_on(
-            self.benchmark_company_id,
+            self.benchmark_security_id,
             execution_bar.date,
         )
         if benchmark_execution_bar is None:
             raise ValueError("benchmark has no bar on candidate execution date")
 
         stock_history = self.market_store.bars_before(
-            event.company_id,
+            security_id,
             decision_day,
             self.feature_lookback_bars,
         )
         benchmark_history = self.market_store.bars_before(
-            self.benchmark_company_id,
+            self.benchmark_security_id,
             decision_day,
             self.feature_lookback_bars,
         )
         if not stock_history:
-            raise ValueError("candidate company has no completed market history before publication")
+            raise ValueError("candidate security has no completed market history before publication")
         if not benchmark_history:
             raise ValueError("benchmark has no completed market history before publication")
 
         return CandidateSnapshot(
             event_id=event.event_id,
             company_id=event.company_id,
+            security_id=security_id,
             decision_time=event.public_time,
             decision_market_date=decision_day,
             execution_date=execution_bar.date,
@@ -98,12 +117,12 @@ class CandidateSnapshotBuilder:
     def label(self, snapshot: CandidateSnapshot) -> LabeledCandidate:
         max_horizon = max(self.label_horizons)
         stock_future = self.market_store.bars_from(
-            snapshot.company_id,
+            snapshot.security_id,
             snapshot.execution_date,
             max_horizon,
         )
         benchmark_future = self.market_store.bars_from(
-            self.benchmark_company_id,
+            self.benchmark_security_id,
             snapshot.execution_date,
             max_horizon,
         )

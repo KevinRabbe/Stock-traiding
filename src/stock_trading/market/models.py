@@ -5,9 +5,16 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class MarketBar(BaseModel):
+    """One dense daily bar for a traded security, never for a legal company.
+
+    Company/entity attribution is intentionally absent. A legal company may map
+    to this security through ``SecurityMapping`` and multiple legal companies
+    may share one continuous security history across reorganizations.
+    """
+
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    company_id: str = Field(min_length=1)
+    security_id: str = Field(min_length=1)
     ticker: str = Field(min_length=1)
     date: date
     open: Decimal = Field(gt=0)
@@ -47,9 +54,17 @@ class TiingoMetadata(BaseModel):
 
 
 class SecurityMapping(BaseModel):
+    """Point-in-time relation between a legal company and a traded security.
+
+    ``security_id`` identifies the provider security history independently of
+    ``company_id``. Therefore several legal companies may legitimately map to
+    the same security across a merger, reincorporation, or successor chain.
+    """
+
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     company_id: str = Field(min_length=1)
+    security_id: str = Field(min_length=1)
     ticker: str = Field(min_length=1)
     exchange_code: str | None = None
     valid_from: date

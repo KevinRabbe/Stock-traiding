@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from stock_trading.core import RawRecord, Source, content_sha256
+from stock_trading.entities import company_id_from_sec_cik
 from stock_trading.market import DuckDbMarketStore, IssuerObservation, MarketBackfillService
 from stock_trading.storage import FileRawStore
 
@@ -297,5 +298,11 @@ def test_market_backfill_deduplicates_shared_security_across_legal_successors(tm
     security_ids = {mapping.security_id for mapping in mappings if mapping is not None}
     assert len(security_ids) == 1
     security_id = next(iter(security_ids))
-    assert market_store.security_for_company("sec_cik_0000011111", date(2020, 1, 2)) == security_id
-    assert market_store.security_for_company("sec_cik_0000022222", date(2020, 1, 2)) == security_id
+    assert (
+        market_store.security_for_company(company_id_from_sec_cik("11111"), date(2020, 1, 2))
+        == security_id
+    )
+    assert (
+        market_store.security_for_company(company_id_from_sec_cik("22222"), date(2020, 1, 2))
+        == security_id
+    )

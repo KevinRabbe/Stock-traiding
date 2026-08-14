@@ -31,6 +31,9 @@ def test_company_name_normalization_ignores_presentation_only_suffixes() -> None
     assert normalize_company_name("MCDONALDS CORP") == normalize_company_name(
         "McDonald’s Corp"
     )
+    assert normalize_company_name("MCDONALDS CORP") == normalize_company_name(
+        "McDonald`s Corp"
+    )
 
 
 def test_alias_promotion_requires_same_cik_ticker_and_validated_name_match() -> None:
@@ -59,8 +62,7 @@ def test_alias_promotion_requires_same_cik_ticker_and_validated_name_match() -> 
             sec_cik="12345",
             issuer_name="UNKNOWN",
             ticker="GOOD",
-            observed_date=date(2021, 1, 2),
-        ),
+            observed_date=date(2021, 1, 2)),
         None,
         "company_name_mismatch",
     )
@@ -70,8 +72,7 @@ def test_alias_promotion_requires_same_cik_ticker_and_validated_name_match() -> 
             sec_cik="99999",
             issuer_name="UNKNOWN",
             ticker="GOOD",
-            observed_date=date(2021, 1, 2),
-        ),
+            observed_date=date(2021, 1, 2)),
         None,
         "company_name_mismatch",
     )

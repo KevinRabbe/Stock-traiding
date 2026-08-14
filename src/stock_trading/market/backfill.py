@@ -65,7 +65,6 @@ class MarketBackfillService:
         metadata_cache: dict[str, object | None] = {}
         metadata_failures: dict[str, str] = {}
         resolutions: list[SecurityResolution] = []
-        series_to_fetch: dict[tuple[str, str], tuple[date, date]] = {}
         failed_metadata_requests = 0
         reused_metadata_responses = 0
 
@@ -143,6 +142,22 @@ class MarketBackfillService:
                 exchange_code=metadata.exchange_code,
             )
             resolutions.append(resolution)
+
+        resolutions = list(_promote_validated_company_aliases(resolutions))
+        conflicted_tickers = _find_ticker_overlap_conflicts(
+            resolutions,
+            existing_mappings=self.security_registry.mappings(),
+        )
+        if conflicted_tickers:
+            resolutions = list(
+                _mark_ticker_overlap_conflicts(
+                    resolutions,
+                    conflicted_tickers=conflicted_tickers,
+                )
+            )
+
+        series_to_fetch: dict[tuple[str, str], tuple[date, date]] = {}
+        for resolution in resolutions:
             if not resolution.resolved or resolution.mapping is None:
                 continue
 
@@ -159,8 +174,6 @@ class MarketBackfillService:
                 series_to_fetch[key] = (fetch_start, fetch_end)
             else:
                 series_to_fetch[key] = (min(existing[0], fetch_start), max(existing[1], fetch_end))
-
-        resolutions = list(_promote_validated_company_aliases(resolutions))
 
         normalized_bars = 0
         downloaded_price_series = 0
@@ -270,6 +283,62 @@ def _promote_validated_company_aliases(
             )
         )
     return tuple(promoted)
+
+
+def _find_ticker_overlap_conflicts(
+    resolutions: list[SecurityResolution] | tuple[SecurityResolution, ...],
+    *,
+    existing_mappings,
+) -> frozenset[str]:
+    """Return tickers whose point-in-time ownership cannot be resolved safely.
+
+    Tiingo metadata describes a ticker-level history. If two different SEC CIKs
+    both resolve that same Tiingo interval, assigning the bars to either company
+    would leak one issuer's history into another. Detect the conflict before any
+    market data is fetched and fail closed for the entire ticker.
+    """
+
+    scratch = SecurityRegistry()
+    for mapping in existing_mappings:
+        scratch.add(mapping)
+
+    conflicted: set[str] = set()
+    for resolution in resolutions:
+        if not resolution.resolved or resolution.mapping is None:
+            continue
+        ticker = normalize_tiingo_ticker(resolution.mapping.ticker)
+        try:
+            scratch.add(resolution.mapping)
+        except ValueError as exc:
+            if "overlaps multiple companies" not in str(exc):
+                raise
+            conflicted.add(ticker)
+    return frozenset(conflicted)
+
+
+def _mark_ticker_overlap_conflicts(
+    resolutions: list[SecurityResolution] | tuple[SecurityResolution, ...],
+    *,
+    conflicted_tickers: frozenset[str],
+) -> tuple[SecurityResolution, ...]:
+    marked: list[SecurityResolution] = []
+    for resolution in resolutions:
+        if not resolution.resolved or resolution.mapping is None:
+            marked.append(resolution)
+            continue
+        ticker = normalize_tiingo_ticker(resolution.mapping.ticker)
+        if ticker not in conflicted_tickers:
+            marked.append(resolution)
+            continue
+        marked.append(
+            SecurityResolution(
+                ResolutionStatus.UNRESOLVED,
+                resolution.observation,
+                None,
+                "ticker_overlap_conflict",
+            )
+        )
+    return tuple(marked)
 
 
 def _price_record_id(ticker: str, start: date, end: date) -> str:

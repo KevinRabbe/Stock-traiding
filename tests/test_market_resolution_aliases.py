@@ -22,6 +22,15 @@ def test_company_name_normalization_ignores_presentation_only_suffixes() -> None
     assert normalize_company_name("Meta Platforms, Inc.") == normalize_company_name(
         "Meta Platforms Inc Class A"
     )
+    assert normalize_company_name("WALT DISNEY CO/") == normalize_company_name(
+        "Walt Disney Co (The)"
+    )
+    assert normalize_company_name("MCDONALDS CORP") == normalize_company_name(
+        "McDonald's Corp"
+    )
+    assert normalize_company_name("MCDONALDS CORP") == normalize_company_name(
+        "McDonald’s Corp"
+    )
 
 
 def test_alias_promotion_requires_same_cik_ticker_and_validated_name_match() -> None:

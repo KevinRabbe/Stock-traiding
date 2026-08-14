@@ -1,6 +1,7 @@
 import argparse
 import json
 from dataclasses import asdict, dataclass
+from datetime import date, datetime
 from math import isfinite
 from pathlib import Path
 
@@ -193,6 +194,8 @@ def _json_safe(value):
         return {str(key): _json_safe(item) for key, item in value.items()}
     if isinstance(value, (tuple, list)):
         return [_json_safe(item) for item in value]
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
     if isinstance(value, float) and not isfinite(value):
         return None
     return value

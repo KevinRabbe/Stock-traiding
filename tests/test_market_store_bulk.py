@@ -9,7 +9,7 @@ from stock_trading.market import DuckDbMarketStore, MarketBar
 def _bar(day: date, *, close: str = "10.5") -> MarketBar:
     value = Decimal(close)
     return MarketBar(
-        company_id="cmp_bulk",
+        security_id="security_bulk",
         ticker="BULK",
         date=day,
         open=Decimal("10"),
@@ -37,12 +37,12 @@ def test_market_store_bulk_upsert_is_idempotent_and_updates_conflicts(tmp_path) 
     store.put_many(bars)
 
     end = start + timedelta(days=999)
-    assert store.count_bars("cmp_bulk", "BULK", start, end) == 1000
-    assert store.date_bounds("cmp_bulk", "BULK") == (start, end)
+    assert store.count_bars("security_bulk", "BULK", start, end) == 1000
+    assert store.date_bounds("security_bulk", "BULK") == (start, end)
 
     replacement = _bar(start + timedelta(days=500), close="99")
     store.put_many([replacement])
 
-    restored = store.bar_on("cmp_bulk", replacement.date)
+    restored = store.bar_on("security_bulk", replacement.date)
     assert restored is not None
     assert restored.close == Decimal("99.0")

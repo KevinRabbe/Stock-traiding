@@ -167,14 +167,14 @@ def normalize_company_name(value: str) -> str:
     SEC flattened filings sometimes append presentation-only jurisdiction or
     reincorporation markers such as ``/MA/`` or ``/NEW``. Market metadata may
     also append a share-class descriptor (for example ``Class A``), a terminal
-    parenthetical article such as ``(The)``, or apostrophe typography that SEC
-    company names omit. None of those should make an otherwise exact issuer-name
-    comparison fail once ticker and point-in-time date checks already agree.
+    parenthetical article such as ``(The)``, or apostrophe-like typography that
+    SEC company names omit. None of those should make an otherwise exact
+    issuer-name comparison fail once ticker and point-in-time date checks agree.
     """
 
     cleaned = _SEC_TRAILING_QUALIFIER.sub("", value.strip())
     cleaned = _TRAILING_PARENTHETICAL_ARTICLE.sub("", cleaned)
-    cleaned = cleaned.replace("’", "'").replace("'", "")
+    cleaned = cleaned.replace("’", "'").replace("'", "").replace("`", "")
     tokens = re.findall(r"[A-Z0-9]+", cleaned.upper().replace("&", " AND "))
 
     if (

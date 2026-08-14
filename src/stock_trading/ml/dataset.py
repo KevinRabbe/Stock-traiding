@@ -90,6 +90,16 @@ class TrainingDatasetBuilder:
         all_events: Iterable[Event],
     ) -> tuple[TrainingRow, ...]:
         event_history = tuple(all_events)
+        history_by_company: dict[str, tuple[Event, ...]] = {}
+        grouped: dict[str, list[Event]] = {}
+        for event in event_history:
+            if event.company_id:
+                grouped.setdefault(event.company_id, []).append(event)
+        for company_id, events in grouped.items():
+            history_by_company[company_id] = tuple(
+                sorted(events, key=lambda event: (event.public_time, event.event_id))
+            )
+
         rows: list[TrainingRow] = []
 
         for trigger in sorted(trigger_events, key=lambda event: (event.public_time, event.event_id)):
@@ -110,20 +120,21 @@ class TrainingDatasetBuilder:
             if label is None:
                 continue
 
+            company_history = history_by_company.get(trigger.company_id, ())
             features = {
                 **snapshot.market_features,
                 **build_insider_features(
-                    event_history,
+                    company_history,
                     company_id=trigger.company_id,
                     decision_time=trigger.public_time,
                 ),
                 **build_alternative_features(
-                    event_history,
+                    company_history,
                     company_id=trigger.company_id,
                     decision_time=trigger.public_time,
                 ),
                 **build_congress_features(
-                    event_history,
+                    company_history,
                     company_id=trigger.company_id,
                     decision_time=trigger.public_time,
                     enabled=self.enable_congress_features,

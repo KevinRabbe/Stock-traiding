@@ -6,6 +6,10 @@ _EXPORTS = {
     "HistoricalExperimentConfig": (".lightgbm", "HistoricalExperimentConfig"),
     "HistoricalExperimentResult": (".lightgbm", "HistoricalExperimentResult"),
     "LightGbmDiagnosticsResult": (".lightgbm_diagnostics", "LightGbmDiagnosticsResult"),
+    "ValidationRankBacktestResult": (
+        ".lightgbm_validation_rank",
+        "ValidationRankBacktestResult",
+    ),
     "LdaEnrichmentConfig": (".enrich", "LdaEnrichmentConfig"),
     "LdaEnrichmentResult": (".enrich", "LdaEnrichmentResult"),
     "SecMarketPopulationConfig": (".prepare", "SecMarketPopulationConfig"),
@@ -14,6 +18,10 @@ _EXPORTS = {
     "populate_sec_and_market": (".prepare", "populate_sec_and_market"),
     "run_historical_experiment": (".lightgbm", "run_historical_experiment"),
     "run_lightgbm_diagnostics": (".lightgbm_diagnostics", "run_lightgbm_diagnostics"),
+    "run_validation_rank_backtest": (
+        ".lightgbm_validation_rank",
+        "run_validation_rank_backtest",
+    ),
 }
 
 __all__ = list(_EXPORTS)

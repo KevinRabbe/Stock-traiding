@@ -121,6 +121,10 @@ def test_historical_experiment_runs_from_stores_to_report(tmp_path) -> None:
     for year in (2022, 2023, 2024):
         for index, (company_id, _security_id, _ticker, _return, value) in enumerate(companies):
             events.append(_event(company_id, year, index, value))
+    # This source event deliberately has no verified company->security mapping.
+    # The real experiment must not load/probe it when the event store is much
+    # larger than the currently prepared market universe.
+    events.append(_event("cmp_unmapped", 2024, 99, "9999"))
     event_store.put_many(events)
 
     output = tmp_path / "experiment"
@@ -149,6 +153,8 @@ def test_historical_experiment_runs_from_stores_to_report(tmp_path) -> None:
         ),
     )
 
+    assert result.source_event_count == 13
+    assert result.mapped_company_count == 4
     assert result.event_count == 12
     assert result.trigger_count == 12
     assert result.training_row_count == 12
@@ -159,5 +165,8 @@ def test_historical_experiment_runs_from_stores_to_report(tmp_path) -> None:
     assert (output / "models" / "2024" / "metadata.json").exists()
 
     report = (output / "report.json").read_text(encoding="utf-8")
-    assert '"schema_version": "historical-lightgbm-v1"' in report
+    assert '"schema_version": "historical-lightgbm-v2"' in report
+    assert '"source_event_count": 13' in report
+    assert '"mapped_company_count": 4' in report
+    assert '"selected_event_count": 12' in report
     assert '"test_year": 2024' in report

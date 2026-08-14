@@ -186,13 +186,24 @@ class DuckDbEventStore:
         self,
         *,
         company_id: str | None = None,
+        company_ids: tuple[str, ...] | list[str] | None = None,
         event_types: tuple[EventType, ...] | None = None,
     ) -> tuple[Event, ...]:
+        if company_id is not None and company_ids is not None:
+            raise ValueError("company_id and company_ids are mutually exclusive")
+
         clauses: list[str] = []
         params: list[object] = []
         if company_id is not None:
             clauses.append("company_id = ?")
             params.append(company_id)
+        elif company_ids is not None:
+            selected_company_ids = tuple(sorted(set(company_ids)))
+            if not selected_company_ids:
+                return ()
+            placeholders = ", ".join("?" for _ in selected_company_ids)
+            clauses.append(f"company_id IN ({placeholders})")
+            params.extend(selected_company_ids)
         if event_types:
             placeholders = ", ".join("?" for _ in event_types)
             clauses.append(f"event_type IN ({placeholders})")

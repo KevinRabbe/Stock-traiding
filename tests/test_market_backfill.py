@@ -98,7 +98,7 @@ class _RangeTiingoClient(_FakeTiingoClient):
         return _raw(f"prices:{ticker}:{start}:{end}", rows)
 
 
-class _OverlappingTickerClient:
+class _SharedSecurityClient:
     def __init__(self) -> None:
         self.metadata_calls: Counter[str] = Counter()
         self.price_calls: Counter[str] = Counter()
@@ -118,7 +118,10 @@ class _OverlappingTickerClient:
 
     def fetch_prices(self, ticker: str, start: date, end: date) -> RawRecord:
         self.price_calls[ticker] += 1
-        raise AssertionError("ambiguous ticker history must not be downloaded")
+        return _raw(
+            f"prices:{ticker}:{start}:{end}",
+            [_price_row(date(2020, 1, 2))],
+        )
 
 
 def _good_observation() -> IssuerObservation:
@@ -162,6 +165,8 @@ def test_market_backfill_continues_after_unavailable_or_incomplete_metadata(tmp_
 
     assert result.failed_metadata_requests == 1
     assert result.unresolved_observations == 2
+    assert result.resolved_companies == 1
+    assert result.resolved_securities == 1
     assert result.downloaded_price_series == 1
     assert result.failed_price_series == 0
     assert result.normalized_bars == 1
@@ -197,6 +202,7 @@ def test_market_backfill_reuses_cached_metadata_and_price_series(tmp_path) -> No
     )
 
     assert first.downloaded_price_series == 1
+    assert first.resolved_securities == 1
     assert second.downloaded_price_series == 0
     assert second.normalized_bars == 1
     assert second.reused_metadata_responses == 1
@@ -248,13 +254,14 @@ def test_market_backfill_fetches_only_incremental_tail_when_end_advances(tmp_pat
     assert client.price_calls["GOOD"] == 2
 
 
-def test_market_backfill_fails_closed_when_ticker_overlaps_multiple_sec_companies(tmp_path) -> None:
+def test_market_backfill_deduplicates_shared_security_across_legal_successors(tmp_path) -> None:
     pytest.importorskip("duckdb")
-    client = _OverlappingTickerClient()
+    client = _SharedSecurityClient()
+    market_store = DuckDbMarketStore(tmp_path / "market.duckdb")
     service = MarketBackfillService(
         client=client,
         raw_store=FileRawStore(tmp_path / "raw"),
-        market_store=DuckDbMarketStore(tmp_path / "market.duckdb"),
+        market_store=market_store,
     )
     observations = [
         IssuerObservation(
@@ -277,12 +284,18 @@ def test_market_backfill_fails_closed_when_ticker_overlaps_multiple_sec_companie
         end=date(2025, 1, 1),
     )
 
-    assert result.resolved_companies == 0
-    assert result.unresolved_observations == 2
-    assert result.downloaded_price_series == 0
-    assert result.normalized_bars == 0
+    assert result.resolved_companies == 2
+    assert result.resolved_securities == 1
+    assert result.unresolved_observations == 0
+    assert result.downloaded_price_series == 1
+    assert result.normalized_bars == 1
     assert client.metadata_calls["SHARED"] == 1
-    assert client.price_calls["SHARED"] == 0
-    assert {resolution.reason for resolution in result.resolutions} == {
-        "ticker_overlap_conflict"
-    }
+    assert client.price_calls["SHARED"] == 1
+
+    mappings = [resolution.mapping for resolution in result.resolutions]
+    assert all(mapping is not None for mapping in mappings)
+    security_ids = {mapping.security_id for mapping in mappings if mapping is not None}
+    assert len(security_ids) == 1
+    security_id = next(iter(security_ids))
+    assert market_store.security_for_company("sec_cik_0000011111", date(2020, 1, 2)) == security_id
+    assert market_store.security_for_company("sec_cik_0000022222", date(2020, 1, 2)) == security_id

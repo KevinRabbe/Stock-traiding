@@ -98,6 +98,29 @@ class _RangeTiingoClient(_FakeTiingoClient):
         return _raw(f"prices:{ticker}:{start}:{end}", rows)
 
 
+class _OverlappingTickerClient:
+    def __init__(self) -> None:
+        self.metadata_calls: Counter[str] = Counter()
+        self.price_calls: Counter[str] = Counter()
+
+    def fetch_metadata(self, ticker: str) -> RawRecord:
+        self.metadata_calls[ticker] += 1
+        return _raw(
+            f"metadata:{ticker}",
+            {
+                "ticker": ticker,
+                "name": "Shared Corp",
+                "exchangeCode": "NASDAQ",
+                "startDate": "2010-01-01",
+                "endDate": None,
+            },
+        )
+
+    def fetch_prices(self, ticker: str, start: date, end: date) -> RawRecord:
+        self.price_calls[ticker] += 1
+        raise AssertionError("ambiguous ticker history must not be downloaded")
+
+
 def _good_observation() -> IssuerObservation:
     return IssuerObservation(
         sec_cik="22222",
@@ -223,3 +246,43 @@ def test_market_backfill_fetches_only_incremental_tail_when_end_advances(tmp_pat
     assert third.skipped_complete_price_series == 1
     assert client.metadata_calls["GOOD"] == 1
     assert client.price_calls["GOOD"] == 2
+
+
+def test_market_backfill_fails_closed_when_ticker_overlaps_multiple_sec_companies(tmp_path) -> None:
+    pytest.importorskip("duckdb")
+    client = _OverlappingTickerClient()
+    service = MarketBackfillService(
+        client=client,
+        raw_store=FileRawStore(tmp_path / "raw"),
+        market_store=DuckDbMarketStore(tmp_path / "market.duckdb"),
+    )
+    observations = [
+        IssuerObservation(
+            sec_cik="11111",
+            issuer_name="Shared Corp",
+            ticker="SHARED",
+            observed_date=date(2018, 1, 2),
+        ),
+        IssuerObservation(
+            sec_cik="22222",
+            issuer_name="Shared Corp",
+            ticker="SHARED",
+            observed_date=date(2022, 1, 3),
+        ),
+    ]
+
+    result = service.backfill(
+        observations,
+        start=date(2015, 1, 1),
+        end=date(2025, 1, 1),
+    )
+
+    assert result.resolved_companies == 0
+    assert result.unresolved_observations == 2
+    assert result.downloaded_price_series == 0
+    assert result.normalized_bars == 0
+    assert client.metadata_calls["SHARED"] == 1
+    assert client.price_calls["SHARED"] == 0
+    assert {resolution.reason for resolution in result.resolutions} == {
+        "ticker_overlap_conflict"
+    }

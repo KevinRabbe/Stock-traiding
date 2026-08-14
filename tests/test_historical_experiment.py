@@ -1,3 +1,4 @@
+import json
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -11,7 +12,11 @@ from stock_trading.core import (
     TradeDirection,
     deterministic_event_id,
 )
-from stock_trading.experiments import HistoricalExperimentConfig, run_historical_experiment
+from stock_trading.experiments import (
+    HistoricalExperimentConfig,
+    run_historical_experiment,
+    run_lightgbm_diagnostics,
+)
 from stock_trading.market import DuckDbMarketStore, MarketBar, SecurityMapping
 from stock_trading.ml import LightGbmTrainingConfig
 from stock_trading.storage import DuckDbEventStore
@@ -170,3 +175,17 @@ def test_historical_experiment_runs_from_stores_to_report(tmp_path) -> None:
     assert '"mapped_company_count": 4' in report
     assert '"selected_event_count": 12' in report
     assert '"test_year": 2024' in report
+
+    diagnostics = run_lightgbm_diagnostics(output)
+    assert diagnostics.training_row_count == 12
+    assert diagnostics.model_years == (2024,)
+    diagnostic_payload = json.loads(diagnostics.output_path.read_text(encoding="utf-8"))
+    assert diagnostic_payload["schema_version"] == "lightgbm-gate-diagnostics-v1"
+    assert diagnostic_payload["trigger_family_counts"] == {
+        "contract": 0,
+        "insider": 12,
+        "lobbying": 0,
+    }
+    assert len(diagnostic_payload["years"]) == 1
+    assert diagnostic_payload["years"][0]["year"] == 2024
+    assert diagnostic_payload["years"][0]["test"]["row_count"] == 4

@@ -1,4 +1,10 @@
-from .dataset import FeatureSchema, TrainingDatasetBuilder, TrainingRow, build_trigger_features
+from .dataset import (
+    FeatureSchema,
+    TrainingDatasetBuilder,
+    TrainingRow,
+    build_opportunity_trigger_features,
+    build_trigger_features,
+)
 from .lightgbm_models import (
     LightGbmModelBundle,
     LightGbmTrainer,
@@ -14,5 +20,6 @@ __all__ = [
     "OpportunityPrediction",
     "TrainingDatasetBuilder",
     "TrainingRow",
+    "build_opportunity_trigger_features",
     "build_trigger_features",
 ]

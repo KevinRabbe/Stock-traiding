@@ -1,4 +1,7 @@
 import csv
+from bisect import bisect_left, bisect_right
+from collections import OrderedDict
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -72,6 +75,12 @@ _BULK_UPSERT_SQL = """
 """
 
 
+@dataclass(frozen=True, slots=True)
+class _CachedSeries:
+    bars: tuple[MarketBar, ...]
+    dates: tuple[date, ...]
+
+
 class DuckDbMarketStore:
     """Dense daily market store keyed by traded security and trading date.
 
@@ -84,11 +93,22 @@ class DuckDbMarketStore:
     the legacy ``market_daily(company_id, ...)`` table. It is never written by
     this class; ``migrate_legacy_company_bars`` can copy verified rows lazily
     after a company/security mapping has been established.
+
+    Historical experiments can enable a bounded read-through cache. The first
+    lookup for a security loads its ordered series once; subsequent PIT slices
+    use binary search in memory instead of reopening DuckDB for every candidate.
     """
 
     def __init__(self, database_path: str | Path) -> None:
         self.database_path = Path(database_path)
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        self._read_cache_size = 0
+        self._series_cache: OrderedDict[str, _CachedSeries] = OrderedDict()
+        self._mapping_cache: dict[str, tuple[tuple[str, date, date | None], ...]] = {}
+        self._series_cache_hits = 0
+        self._series_cache_misses = 0
+        self._mapping_cache_hits = 0
+        self._mapping_cache_misses = 0
         self._initialize()
 
     def _connect(self):
@@ -97,6 +117,38 @@ class DuckDbMarketStore:
         except ImportError as exc:
             raise RuntimeError("DuckDB is required for market storage") from exc
         return duckdb.connect(str(self.database_path))
+
+    def enable_read_cache(self, *, max_series: int = 8) -> None:
+        """Enable bounded in-memory historical reads for repeated PIT queries."""
+
+        if max_series <= 0:
+            raise ValueError("max_series must be > 0")
+        self._read_cache_size = max_series
+        self.clear_read_cache()
+
+    def disable_read_cache(self) -> None:
+        self._read_cache_size = 0
+        self.clear_read_cache()
+
+    def clear_read_cache(self) -> None:
+        self._series_cache.clear()
+        self._mapping_cache.clear()
+        self._series_cache_hits = 0
+        self._series_cache_misses = 0
+        self._mapping_cache_hits = 0
+        self._mapping_cache_misses = 0
+
+    def read_cache_stats(self) -> dict[str, int]:
+        return {
+            "enabled": int(self._read_cache_size > 0),
+            "max_series": self._read_cache_size,
+            "cached_series": len(self._series_cache),
+            "cached_companies": len(self._mapping_cache),
+            "series_hits": self._series_cache_hits,
+            "series_misses": self._series_cache_misses,
+            "mapping_hits": self._mapping_cache_hits,
+            "mapping_misses": self._mapping_cache_misses,
+        }
 
     def _initialize(self) -> None:
         with self._connect() as connection:
@@ -215,6 +267,7 @@ class DuckDbMarketStore:
                     mapping.valid_to,
                 ],
             )
+        self._mapping_cache.pop(mapping.company_id, None)
 
     def migrate_legacy_company_bars(self, mapping: SecurityMapping) -> int:
         """Copy verified legacy company-keyed bars into security-keyed storage.
@@ -271,6 +324,8 @@ class DuckDbMarketStore:
                 [mapping.security_id],
             ).fetchone()
             after_count = int(after[0]) if after is not None else before_count
+        if after_count != before_count:
+            self._series_cache.pop(mapping.security_id, None)
         return after_count - before_count
 
     def put_many(self, bars: tuple[MarketBar, ...] | list[MarketBar]) -> None:
@@ -315,23 +370,33 @@ class DuckDbMarketStore:
 
             with self._connect() as connection:
                 connection.execute(_BULK_UPSERT_SQL, [str(temporary_path)])
+            for security_id in {bar.security_id for bar in bars}:
+                self._series_cache.pop(security_id, None)
         finally:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
 
     def security_for_company(self, company_id: str, day: date) -> str | None:
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT DISTINCT security_id
-                FROM company_security_map
-                WHERE company_id = ?
-                  AND valid_from <= ?
-                  AND (valid_to IS NULL OR valid_to >= ?)
-                """,
-                [company_id, day, day],
-            ).fetchall()
-        unique = {row[0] for row in rows}
+        if self._read_cache_size > 0:
+            rows = self._company_mappings(company_id)
+            unique = {
+                security_id
+                for security_id, valid_from, valid_to in rows
+                if valid_from <= day and (valid_to is None or valid_to >= day)
+            }
+        else:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT DISTINCT security_id
+                    FROM company_security_map
+                    WHERE company_id = ?
+                      AND valid_from <= ?
+                      AND (valid_to IS NULL OR valid_to >= ?)
+                    """,
+                    [company_id, day, day],
+                ).fetchall()
+            unique = {row[0] for row in rows}
         if len(unique) > 1:
             raise ValueError(f"multiple active securities for {company_id} on {day}")
         return next(iter(unique), None)
@@ -373,6 +438,11 @@ class DuckDbMarketStore:
         return int(row[0]) if row is not None else 0
 
     def next_bar_after(self, security_id: str, day: date) -> MarketBar | None:
+        series = self._series_for_read(security_id)
+        if series is not None:
+            index = bisect_right(series.dates, day)
+            return series.bars[index] if index < len(series.bars) else None
+
         with self._connect() as connection:
             cursor = connection.execute(
                 """
@@ -387,6 +457,13 @@ class DuckDbMarketStore:
         return _market_bar(row) if row is not None else None
 
     def bar_on(self, security_id: str, day: date) -> MarketBar | None:
+        series = self._series_for_read(security_id)
+        if series is not None:
+            index = bisect_left(series.dates, day)
+            if index < len(series.dates) and series.dates[index] == day:
+                return series.bars[index]
+            return None
+
         with self._connect() as connection:
             cursor = connection.execute(
                 "SELECT * FROM security_market_daily WHERE security_id = ? AND date = ?",
@@ -400,6 +477,12 @@ class DuckDbMarketStore:
 
         if limit <= 0:
             raise ValueError("limit must be > 0")
+        series = self._series_for_read(security_id)
+        if series is not None:
+            end = bisect_left(series.dates, day)
+            start = max(0, end - limit)
+            return list(series.bars[start:end])
+
         with self._connect() as connection:
             cursor = connection.execute(
                 """
@@ -419,6 +502,11 @@ class DuckDbMarketStore:
     def bars_from(self, security_id: str, start_day: date, limit: int) -> list[MarketBar]:
         if limit <= 0:
             raise ValueError("limit must be > 0")
+        series = self._series_for_read(security_id)
+        if series is not None:
+            start = bisect_left(series.dates, start_day)
+            return list(series.bars[start : start + limit])
+
         with self._connect() as connection:
             cursor = connection.execute(
                 """
@@ -442,6 +530,59 @@ class DuckDbMarketStore:
                 f"TO '{escaped}' (FORMAT PARQUET)"
             )
         return path
+
+    def _company_mappings(self, company_id: str) -> tuple[tuple[str, date, date | None], ...]:
+        cached = self._mapping_cache.get(company_id)
+        if cached is not None:
+            self._mapping_cache_hits += 1
+            return cached
+
+        self._mapping_cache_misses += 1
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT security_id, valid_from, valid_to
+                FROM company_security_map
+                WHERE company_id = ?
+                ORDER BY valid_from, security_id
+                """,
+                [company_id],
+            ).fetchall()
+        result = tuple((str(row[0]), row[1], row[2]) for row in rows)
+        self._mapping_cache[company_id] = result
+        return result
+
+    def _series_for_read(self, security_id: str) -> _CachedSeries | None:
+        if self._read_cache_size <= 0:
+            return None
+
+        cached = self._series_cache.get(security_id)
+        if cached is not None:
+            self._series_cache_hits += 1
+            self._series_cache.move_to_end(security_id)
+            return cached
+
+        self._series_cache_misses += 1
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                SELECT * FROM security_market_daily
+                WHERE security_id = ?
+                ORDER BY date
+                """,
+                [security_id],
+            )
+            rows = _all_dicts(cursor)
+        bars = tuple(_market_bar(row) for row in rows)
+        cached = _CachedSeries(
+            bars=bars,
+            dates=tuple(bar.date for bar in bars),
+        )
+        self._series_cache[security_id] = cached
+        self._series_cache.move_to_end(security_id)
+        while len(self._series_cache) > self._read_cache_size:
+            self._series_cache.popitem(last=False)
+        return cached
 
 
 def _market_bar(row: dict) -> MarketBar:

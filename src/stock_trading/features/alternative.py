@@ -4,26 +4,31 @@ from statistics import mean
 
 from stock_trading.core import Event, EventType, TradeDirection, as_utc
 
+from .event_index import CompanyEventIndex, ensure_company_event_index
+
 
 def build_contract_features(
-    events: Iterable[Event],
+    events: Iterable[Event] | CompanyEventIndex,
     *,
     company_id: str,
     decision_time: datetime,
 ) -> dict[str, float | None]:
     decision = as_utc(decision_time)
-    contracts = _events_for(events, company_id, EventType.GOVERNMENT_CONTRACT, decision)
+    index = ensure_company_event_index(events, company_id=company_id)
     features: dict[str, float | None] = {}
 
-    for days in (7, 30, 90, 365):
-        recent = _within(contracts, decision, days)
+    windows = {
+        days: index.within(EventType.GOVERNMENT_CONTRACT, decision, days)
+        for days in (7, 30, 90, 365)
+    }
+    for days, recent in windows.items():
         values = [_contract_obligation(event) for event in recent]
         numeric = [value for value in values if value is not None]
         features[f"contracts.count_{days}d"] = float(len(recent))
         features[f"contracts.obligation_{days}d"] = sum(numeric) if numeric else 0.0
 
-    recent_90 = _within(contracts, decision, 90)
-    older_365 = _between(contracts, decision, 365, 90)
+    recent_90 = windows[90]
+    older_365 = index.between(EventType.GOVERNMENT_CONTRACT, decision, 365, 90)
     agencies = {
         event.payload.agency
         for event in recent_90
@@ -44,22 +49,32 @@ def build_contract_features(
     features["contracts.has_new_agency_relationship_90d"] = float(bool(agencies - older_agencies))
     features["contracts.first_contract_in_90d"] = float(
         bool(recent_90)
-        and not any(event.public_time <= decision - timedelta(days=90) for event in contracts)
+        and not index.has_at_or_before(
+            EventType.GOVERNMENT_CONTRACT,
+            decision - timedelta(days=90),
+        )
     )
     features["contracts.largest_obligation_90d"] = max(obligations_90, default=0.0)
-    features["contracts.agency_concentration_365d"] = _agency_concentration(
-        _within(contracts, decision, 365)
-    )
+    features["contracts.agency_concentration_365d"] = _agency_concentration(windows[365])
 
-    current_30 = _sum_contracts(_within(contracts, decision, 30))
-    previous_30 = _sum_contracts(_between(contracts, decision, 60, 30))
+    current_30 = _sum_contracts(windows[30])
+    previous_30 = _sum_contracts(
+        index.between(EventType.GOVERNMENT_CONTRACT, decision, 60, 30)
+    )
     features["contracts.obligation_change_30d"] = current_30 - previous_30
     features["contracts.obligation_ratio_30d"] = (
         current_30 / previous_30 if previous_30 > 0 else None
     )
 
     prior_months = [
-        _sum_contracts(_between(contracts, decision, end, end - 30))
+        _sum_contracts(
+            index.between(
+                EventType.GOVERNMENT_CONTRACT,
+                decision,
+                end,
+                end - 30,
+            )
+        )
         for end in range(60, 361, 30)
     ]
     positive_history = [value for value in prior_months if value > 0]
@@ -78,24 +93,27 @@ def build_contract_features(
 
 
 def build_lobbying_features(
-    events: Iterable[Event],
+    events: Iterable[Event] | CompanyEventIndex,
     *,
     company_id: str,
     decision_time: datetime,
 ) -> dict[str, float | None]:
     decision = as_utc(decision_time)
-    filings = _events_for(events, company_id, EventType.LOBBYING_ACTIVITY, decision)
+    index = ensure_company_event_index(events, company_id=company_id)
     features: dict[str, float | None] = {}
 
-    for days in (90, 365):
-        recent = _within(filings, decision, days)
+    windows = {
+        days: index.within(EventType.LOBBYING_ACTIVITY, decision, days)
+        for days in (90, 365)
+    }
+    for days, recent in windows.items():
         amounts = [_lobbying_amount(event) for event in recent]
         numeric = [value for value in amounts if value is not None]
         features[f"lobbying.count_{days}d"] = float(len(recent))
         features[f"lobbying.amount_{days}d"] = sum(numeric) if numeric else 0.0
 
-    recent_90 = _within(filings, decision, 90)
-    prior_90 = _between(filings, decision, 180, 90)
+    recent_90 = windows[90]
+    prior_90 = index.between(EventType.LOBBYING_ACTIVITY, decision, 180, 90)
     recent_amount = sum(
         value for value in (_lobbying_amount(event) for event in recent_90) if value is not None
     )
@@ -108,10 +126,10 @@ def build_lobbying_features(
     )
 
     recent_topics = _lobbying_issue_codes(recent_90)
-    older_365 = _between(filings, decision, 365, 90)
+    older_365 = index.between(EventType.LOBBYING_ACTIVITY, decision, 365, 90)
     older_topics = _lobbying_issue_codes(older_365)
     features["lobbying.unique_issue_codes_365d"] = float(
-        len(_lobbying_issue_codes(_within(filings, decision, 365)))
+        len(_lobbying_issue_codes(windows[365]))
     )
     features["lobbying.new_issue_codes_90d"] = float(len(recent_topics - older_topics))
 
@@ -142,33 +160,35 @@ def build_lobbying_features(
 
 
 def build_cross_source_features(
-    events: Iterable[Event],
+    events: Iterable[Event] | CompanyEventIndex,
     *,
     company_id: str,
     decision_time: datetime,
 ) -> dict[str, float | None]:
     decision = as_utc(decision_time)
-    visible = [
-        event
-        for event in events
-        if event.company_id == company_id and event.public_time <= decision
-    ]
+    index = ensure_company_event_index(events, company_id=company_id)
 
-    insider_buys = [
-        event
-        for event in visible
-        if event.event_type is EventType.INSIDER_TRANSACTION and _is_discretionary_buy(event)
-    ]
-    contracts = [event for event in visible if event.event_type is EventType.GOVERNMENT_CONTRACT]
-    lobbying = [event for event in visible if event.event_type is EventType.LOBBYING_ACTIVITY]
+    insider_30 = index.within(EventType.INSIDER_TRANSACTION, decision, 30)
+    insider_90 = index.within(EventType.INSIDER_TRANSACTION, decision, 90)
+    insider_180 = index.within(EventType.INSIDER_TRANSACTION, decision, 180)
+    recent_insider_buys = [event for event in insider_30 if _is_discretionary_buy(event)]
+    insider_buys_90 = [event for event in insider_90 if _is_discretionary_buy(event)]
+    insider_buys_180 = [event for event in insider_180 if _is_discretionary_buy(event)]
 
-    recent_insider_buys = _within(insider_buys, decision, 30)
-    recent_contracts = _within(contracts, decision, 30)
-    recent_lobbying = _within(lobbying, decision, 30)
+    recent_contracts = index.within(EventType.GOVERNMENT_CONTRACT, decision, 30)
+    contracts_90 = index.within(EventType.GOVERNMENT_CONTRACT, decision, 90)
+    contracts_180 = index.within(EventType.GOVERNMENT_CONTRACT, decision, 180)
+    recent_lobbying = index.within(EventType.LOBBYING_ACTIVITY, decision, 30)
+    lobbying_90 = index.within(EventType.LOBBYING_ACTIVITY, decision, 90)
+    lobbying_180 = index.within(EventType.LOBBYING_ACTIVITY, decision, 180)
 
-    latest_insider = _latest(insider_buys)
-    latest_contract = _latest(contracts)
-    latest_lobbying = _latest(lobbying)
+    latest_insider = index.latest_matching(
+        EventType.INSIDER_TRANSACTION,
+        decision,
+        _is_discretionary_buy,
+    )
+    latest_contract = index.latest(EventType.GOVERNMENT_CONTRACT, decision)
+    latest_lobbying = index.latest(EventType.LOBBYING_ACTIVITY, decision)
 
     features: dict[str, float | None] = {
         "cross.insider_plus_contract_30d": float(
@@ -189,18 +209,18 @@ def build_cross_source_features(
         "cross.days_insider_to_contract": _days_between(latest_insider, latest_contract),
         "cross.days_lobbying_to_contract": _days_between(latest_lobbying, latest_contract),
         "cross.insider_buy_before_contract_90d": float(
-            _ordered_within(insider_buys, contracts, decision, 90)
+            _ordered(insider_buys_90, contracts_90)
         ),
         "cross.lobbying_before_contract_90d": float(
-            _ordered_within(lobbying, contracts, decision, 90)
+            _ordered(lobbying_90, contracts_90)
         ),
         "cross.lobbying_then_insider_then_contract_180d": float(
-            _three_stage_sequence(lobbying, insider_buys, contracts, decision, 180)
+            _three_stage_sequence(lobbying_180, insider_buys_180, contracts_180)
         ),
     }
 
-    contract_topics = _semantic_topics(_within(contracts, decision, 90))
-    lobbying_topics = _semantic_topics(_within(lobbying, decision, 90))
+    contract_topics = _semantic_topics(contracts_90)
+    lobbying_topics = _semantic_topics(lobbying_90)
     shared_topics = contract_topics & lobbying_topics
     features["cross.shared_contract_lobbying_topics_90d"] = float(len(shared_topics))
     features["cross.topic_aligned_contract_lobbying_90d"] = float(bool(shared_topics))
@@ -214,51 +234,17 @@ def build_cross_source_features(
 
 
 def build_alternative_features(
-    events: Iterable[Event],
+    events: Iterable[Event] | CompanyEventIndex,
     *,
     company_id: str,
     decision_time: datetime,
 ) -> dict[str, float | None]:
-    materialized = tuple(events)
+    index = ensure_company_event_index(events, company_id=company_id)
     return {
-        **build_contract_features(materialized, company_id=company_id, decision_time=decision_time),
-        **build_lobbying_features(materialized, company_id=company_id, decision_time=decision_time),
-        **build_cross_source_features(materialized, company_id=company_id, decision_time=decision_time),
+        **build_contract_features(index, company_id=company_id, decision_time=decision_time),
+        **build_lobbying_features(index, company_id=company_id, decision_time=decision_time),
+        **build_cross_source_features(index, company_id=company_id, decision_time=decision_time),
     }
-
-
-def _events_for(
-    events: Iterable[Event],
-    company_id: str,
-    event_type: EventType,
-    decision_time: datetime,
-) -> list[Event]:
-    return sorted(
-        (
-            event
-            for event in events
-            if event.company_id == company_id
-            and event.event_type is event_type
-            and event.public_time <= decision_time
-        ),
-        key=lambda event: event.public_time,
-    )
-
-
-def _within(events: Iterable[Event], decision: datetime, days: int) -> list[Event]:
-    cutoff = decision - timedelta(days=days)
-    return [event for event in events if cutoff < event.public_time <= decision]
-
-
-def _between(
-    events: Iterable[Event],
-    decision: datetime,
-    older_days: int,
-    newer_days: int,
-) -> list[Event]:
-    older = decision - timedelta(days=older_days)
-    newer = decision - timedelta(days=newer_days)
-    return [event for event in events if older < event.public_time <= newer]
 
 
 def _contract_obligation(event: Event) -> float | None:
@@ -310,42 +296,30 @@ def _semantic_topics(events: Iterable[Event]) -> set[str]:
     }
 
 
-def _latest(events: Iterable[Event]) -> Event | None:
-    return max(events, key=lambda event: event.public_time, default=None)
-
-
 def _days_between(left: Event | None, right: Event | None) -> float | None:
     if left is None or right is None:
         return None
-    return (right.public_time - left.public_time).total_seconds() / 86400.0
+    return (as_utc(right.public_time) - as_utc(left.public_time)).total_seconds() / 86400.0
 
 
-def _ordered_within(
-    first_events: Iterable[Event],
-    second_events: Iterable[Event],
-    decision: datetime,
-    days: int,
-) -> bool:
-    first = _within(first_events, decision, days)
-    second = _within(second_events, decision, days)
-    return any(left.public_time < right.public_time for left in first for right in second)
+def _ordered(first_events: Iterable[Event], second_events: Iterable[Event]) -> bool:
+    return any(
+        as_utc(left.public_time) < as_utc(right.public_time)
+        for left in first_events
+        for right in second_events
+    )
 
 
 def _three_stage_sequence(
     first_events: Iterable[Event],
     second_events: Iterable[Event],
     third_events: Iterable[Event],
-    decision: datetime,
-    days: int,
 ) -> bool:
-    first = _within(first_events, decision, days)
-    second = _within(second_events, decision, days)
-    third = _within(third_events, decision, days)
     return any(
-        one.public_time < two.public_time < three.public_time
-        for one in first
-        for two in second
-        for three in third
+        as_utc(one.public_time) < as_utc(two.public_time) < as_utc(three.public_time)
+        for one in first_events
+        for two in second_events
+        for three in third_events
     )
 
 

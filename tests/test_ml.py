@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import date, datetime, timezone
 
 import numpy as np
@@ -10,6 +11,7 @@ from stock_trading.ml import (
     LightGbmTrainingConfig,
     TrainingRow,
 )
+from stock_trading.ml.lightgbm_models import _company_balanced_weights
 from stock_trading.ml.walk_forward import annual_walk_forward_splits
 
 
@@ -53,6 +55,19 @@ def test_feature_schema_preserves_missing_values_as_nan() -> None:
     assert matrix.shape == (2, 2)
     assert np.isnan(matrix[0, 1])
     assert not np.isnan(matrix[1, 1])
+
+
+def test_company_balanced_weights_equalize_company_mass() -> None:
+    rows = (
+        replace(_row(0), company_id="cmp_a"),
+        replace(_row(1), company_id="cmp_a"),
+        replace(_row(2), company_id="cmp_a"),
+        replace(_row(3), company_id="cmp_b"),
+    )
+    weights = _company_balanced_weights(rows)
+
+    assert weights.mean() == pytest.approx(1.0)
+    assert weights[:3].sum() == pytest.approx(weights[3])
 
 
 def test_lightgbm_bundle_learns_signal_and_round_trips(tmp_path) -> None:

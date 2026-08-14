@@ -128,6 +128,9 @@ def test_historical_experiment_runs_from_stores_to_report(tmp_path) -> None:
     for year in (2022, 2023, 2024):
         for index, (company_id, _security_id, _ticker, _return, value) in enumerate(companies):
             events.append(_event(company_id, year, index, value))
+    # Two same-company source rows public before the same next market session must
+    # become one opportunity row, not two independent training samples.
+    events.append(_event("cmp_fast", 2024, 100, "2500"))
     # This source event deliberately has no verified company->security mapping.
     # The real experiment must not load/probe it when the event store is much
     # larger than the currently prepared market universe.
@@ -160,10 +163,11 @@ def test_historical_experiment_runs_from_stores_to_report(tmp_path) -> None:
         ),
     )
 
-    assert result.source_event_count == 13
+    assert result.source_event_count == 14
     assert result.mapped_company_count == 4
-    assert result.event_count == 12
-    assert result.trigger_count == 12
+    assert result.event_count == 13
+    assert result.trigger_count == 13
+    assert result.aggregated_trigger_event_count == 13
     assert result.training_row_count == 12
     assert result.tested_years == (2024,)
     assert (output / "training_rows.jsonl").exists()
@@ -171,12 +175,31 @@ def test_historical_experiment_runs_from_stores_to_report(tmp_path) -> None:
     assert (output / "models" / "2024" / "alpha.txt").exists()
     assert (output / "models" / "2024" / "metadata.json").exists()
 
-    report = (output / "report.json").read_text(encoding="utf-8")
-    assert '"schema_version": "historical-lightgbm-v2"' in report
-    assert '"source_event_count": 13' in report
-    assert '"mapped_company_count": 4' in report
-    assert '"selected_event_count": 12' in report
-    assert '"test_year": 2024' in report
+    training_rows = [
+        json.loads(line)
+        for line in (output / "training_rows.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    fast_2024 = next(
+        row
+        for row in training_rows
+        if row["company_id"] == "cmp_fast" and row["decision_time"].startswith("2024-")
+    )
+    assert fast_2024["event_id"].startswith("opportunity:cmp_fast:")
+    assert len(fast_2024["trigger_event_ids"]) == 2
+    assert fast_2024["features"]["trigger.event_count"] == 2.0
+    assert fast_2024["features"]["trigger.insider_event_count"] == 2.0
+
+    report_payload = json.loads((output / "report.json").read_text(encoding="utf-8"))
+    assert report_payload["schema_version"] == "historical-lightgbm-v3-opportunity"
+    assert report_payload["dataset"]["row_unit"] == "company_execution_session_opportunity"
+    assert report_payload["dataset"]["source_event_count"] == 14
+    assert report_payload["dataset"]["mapped_company_count"] == 4
+    assert report_payload["dataset"]["selected_event_count"] == 13
+    assert report_payload["dataset"]["raw_trigger_event_count"] == 13
+    assert report_payload["dataset"]["training_row_count"] == 12
+    assert report_payload["training_config"]["balance_companies"] is True
+    assert report_payload["years"][0]["test_year"] == 2024
 
     diagnostics = run_lightgbm_diagnostics(output)
     assert diagnostics.training_row_count == 12

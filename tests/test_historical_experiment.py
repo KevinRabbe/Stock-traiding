@@ -16,6 +16,7 @@ from stock_trading.experiments import (
     HistoricalExperimentConfig,
     run_historical_experiment,
     run_lightgbm_diagnostics,
+    run_validation_rank_backtest,
 )
 from stock_trading.market import DuckDbMarketStore, MarketBar, SecurityMapping
 from stock_trading.ml import LightGbmTrainingConfig
@@ -189,3 +190,12 @@ def test_historical_experiment_runs_from_stores_to_report(tmp_path) -> None:
     assert len(diagnostic_payload["years"]) == 1
     assert diagnostic_payload["years"][0]["year"] == 2024
     assert diagnostic_payload["years"][0]["test"]["row_count"] == 4
+
+    ranked = run_validation_rank_backtest(output, validation_top_fraction=0.25)
+    assert ranked.training_row_count == 12
+    assert ranked.model_years == (2024,)
+    ranked_payload = json.loads(ranked.output_path.read_text(encoding="utf-8"))
+    assert ranked_payload["schema_version"] == "validation-ranked-lightgbm-v1"
+    assert ranked_payload["selection_policy"]["validation_top_fraction"] == 0.25
+    assert ranked_payload["years"][0]["test_year"] == 2024
+    assert ranked_payload["years"][0]["validation_selected_count"] >= 1

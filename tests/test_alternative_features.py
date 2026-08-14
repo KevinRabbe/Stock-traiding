@@ -15,7 +15,11 @@ from stock_trading.core import (
     TradeDirection,
     deterministic_event_id,
 )
-from stock_trading.features import build_alternative_features, build_cross_source_features
+from stock_trading.features import (
+    CompanyEventIndex,
+    build_alternative_features,
+    build_cross_source_features,
+)
 
 
 _COMPANY = "cmp_test"
@@ -160,3 +164,39 @@ def test_insider_sale_does_not_activate_buy_convergence() -> None:
     assert features["cross.insider_plus_lobbying_30d"] == 0.0
     assert features["cross.signal_family_count_30d"] == 1.0
     assert features["cross.days_insider_to_contract"] is None
+
+
+def test_company_event_index_preserves_strict_temporal_boundaries() -> None:
+    exact_30 = _contract(days_ago=30, amount="100", suffix="exact-30")
+    inside_30 = _contract(days_ago=29, amount="200", suffix="inside-30")
+    future = _contract(days_ago=-1, amount="999", suffix="future")
+    index = CompanyEventIndex(_COMPANY, (future, inside_30, exact_30))
+
+    recent = index.within(EventType.GOVERNMENT_CONTRACT, _DECISION, 30)
+    assert [event.source_record_id for event in recent] == ["test:inside-30"]
+    assert index.latest(EventType.GOVERNMENT_CONTRACT, _DECISION) == inside_30
+    assert index.has_at_or_before(
+        EventType.GOVERNMENT_CONTRACT,
+        _DECISION - timedelta(days=30),
+    )
+
+
+def test_indexed_and_iterable_feature_inputs_are_identical() -> None:
+    events = [
+        _contract(days_ago=5, amount="300", suffix="recent-contract"),
+        _contract(days_ago=40, amount="100", suffix="prior-contract"),
+        _lobbying(days_ago=10, amount="200", suffix="recent-lobby"),
+        _lobbying(days_ago=120, amount="50", suffix="prior-lobby"),
+        _insider(days_ago=3, buy=True, suffix="buy"),
+    ]
+    index = CompanyEventIndex(_COMPANY, events)
+
+    assert build_alternative_features(
+        index,
+        company_id=_COMPANY,
+        decision_time=_DECISION,
+    ) == build_alternative_features(
+        events,
+        company_id=_COMPANY,
+        decision_time=_DECISION,
+    )

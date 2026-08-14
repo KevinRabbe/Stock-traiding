@@ -1,3 +1,4 @@
+import hashlib
 import re
 from dataclasses import dataclass
 from datetime import date
@@ -48,7 +49,13 @@ class ConservativeTiingoResolver:
     - the SEC observation date falls inside Tiingo's available date interval;
     - the normalized company names match after conservative legal-suffix cleanup.
 
-    Anything else remains unresolved for later manual/permaTicker handling.
+    The resulting ``security_id`` identifies the Tiingo security history rather
+    than the SEC legal entity. This is deliberate: a continuous traded security
+    can survive a legal-company reorganization and therefore be shared by more
+    than one SEC CIK without duplicating or mis-owning its market bars.
+
+    Anything else remains unresolved for later manual/permaTicker/succession
+    handling.
     """
 
     def resolve(
@@ -105,6 +112,7 @@ class ConservativeTiingoResolver:
 
         mapping = SecurityMapping(
             company_id=normalized_observation.company_id,
+            security_id=tiingo_security_id(normalized_tiingo_ticker, tiingo_start),
             ticker=normalized_tiingo_ticker,
             exchange_code=exchange_code,
             valid_from=tiingo_start,
@@ -135,6 +143,21 @@ _LEGAL_SUFFIXES = {
 }
 _SEC_TRAILING_QUALIFIER = re.compile(r"\s*/(?:[A-Z]{2}|NEW)/?\s*$", re.IGNORECASE)
 _SHARE_CLASS_MARKERS = {"CLASS", "CL"}
+
+
+def tiingo_security_id(ticker: str, history_start: date) -> str:
+    """Return a stable ID for one Tiingo EOD security history.
+
+    The ID intentionally excludes company name and SEC CIK so legal successor
+    entities can reference the same price series. ``history_start`` prevents a
+    later reuse of the same ticker from silently becoming the same security.
+    Active-history end dates are excluded because they change over time.
+    """
+
+    normalized_ticker = normalize_tiingo_ticker(ticker)
+    material = f"tiingo-eod|{normalized_ticker}|{history_start.isoformat()}"
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+    return f"security_tiingo_{digest}"
 
 
 def normalize_company_name(value: str) -> str:

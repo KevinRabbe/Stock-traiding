@@ -27,6 +27,7 @@ class LightGbmTrainingConfig:
     bagging_fraction: float = 0.9
     bagging_freq: int = 1
     downside_penalty: float = 0.5
+    balance_companies: bool = True
     seed: int = 42
 
 
@@ -121,12 +122,24 @@ class LightGbmTrainer:
         schema = FeatureSchema.from_rows(train_rows)
         train_x = schema.matrix(train_rows)
         validation_x = schema.matrix(validation_rows)
+        train_weight = (
+            _company_balanced_weights(train_rows)
+            if self.config.balance_companies
+            else None
+        )
+        validation_weight = (
+            _company_balanced_weights(validation_rows)
+            if self.config.balance_companies
+            else None
+        )
 
         alpha = self._train_one(
             train_x,
             np.asarray([row.alpha_20d for row in train_rows], dtype=np.float64),
             validation_x,
             np.asarray([row.alpha_20d for row in validation_rows], dtype=np.float64),
+            train_weight=train_weight,
+            validation_weight=validation_weight,
             feature_names=schema.names,
             objective="regression_l2",
             metric="l2",
@@ -136,6 +149,8 @@ class LightGbmTrainer:
             np.asarray([row.downside_20d for row in train_rows], dtype=np.float64),
             validation_x,
             np.asarray([row.downside_20d for row in validation_rows], dtype=np.float64),
+            train_weight=train_weight,
+            validation_weight=validation_weight,
             feature_names=schema.names,
             objective="regression_l1",
             metric="l1",
@@ -145,6 +160,8 @@ class LightGbmTrainer:
             np.asarray([row.positive_alpha_20d for row in train_rows], dtype=np.float64),
             validation_x,
             np.asarray([row.positive_alpha_20d for row in validation_rows], dtype=np.float64),
+            train_weight=train_weight,
+            validation_weight=validation_weight,
             feature_names=schema.names,
             objective="binary",
             metric="binary_logloss",
@@ -166,6 +183,8 @@ class LightGbmTrainer:
         validation_x: np.ndarray,
         validation_y: np.ndarray,
         *,
+        train_weight: np.ndarray | None,
+        validation_weight: np.ndarray | None,
         feature_names: tuple[str, ...],
         objective: str,
         metric: str,
@@ -191,12 +210,14 @@ class LightGbmTrainer:
         train_set = lgb.Dataset(
             train_x,
             label=train_y,
+            weight=train_weight,
             feature_name=list(feature_names),
             free_raw_data=False,
         )
         validation_set = lgb.Dataset(
             validation_x,
             label=validation_y,
+            weight=validation_weight,
             reference=train_set,
             free_raw_data=False,
         )
@@ -215,3 +236,23 @@ class LightGbmTrainer:
                 lgb.log_evaluation(period=0),
             ],
         )
+
+
+def _company_balanced_weights(rows: tuple[TrainingRow, ...]) -> np.ndarray:
+    counts: dict[str, int] = {}
+    for row in rows:
+        counts[row.company_id] = counts.get(row.company_id, 0) + 1
+    company_count = len(counts)
+    if company_count == 0:
+        raise ValueError("cannot balance an empty company set")
+
+    # Mean weight stays at 1.0 while every company contributes equal total
+    # training mass inside the current train/validation split.
+    row_count = len(rows)
+    return np.asarray(
+        [
+            row_count / (company_count * counts[row.company_id])
+            for row in rows
+        ],
+        dtype=np.float64,
+    )

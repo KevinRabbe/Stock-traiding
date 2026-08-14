@@ -303,11 +303,9 @@ def _days_between(left: Event | None, right: Event | None) -> float | None:
 
 
 def _ordered(first_events: Iterable[Event], second_events: Iterable[Event]) -> bool:
-    return any(
-        as_utc(left.public_time) < as_utc(right.public_time)
-        for left in first_events
-        for right in second_events
-    )
+    first_times = [as_utc(event.public_time) for event in first_events]
+    second_times = [as_utc(event.public_time) for event in second_events]
+    return bool(first_times and second_times) and min(first_times) < max(second_times)
 
 
 def _three_stage_sequence(
@@ -315,12 +313,14 @@ def _three_stage_sequence(
     second_events: Iterable[Event],
     third_events: Iterable[Event],
 ) -> bool:
-    return any(
-        as_utc(one.public_time) < as_utc(two.public_time) < as_utc(three.public_time)
-        for one in first_events
-        for two in second_events
-        for three in third_events
-    )
+    first_times = [as_utc(event.public_time) for event in first_events]
+    second_times = [as_utc(event.public_time) for event in second_events]
+    third_times = [as_utc(event.public_time) for event in third_events]
+    if not first_times or not second_times or not third_times:
+        return False
+    earliest_first = min(first_times)
+    latest_third = max(third_times)
+    return any(earliest_first < second < latest_third for second in second_times)
 
 
 def _is_discretionary_buy(event: Event) -> bool:

@@ -32,7 +32,7 @@ class TiingoNormalizer:
         self,
         raw: RawRecord,
         *,
-        company_id: str,
+        security_id: str,
         ticker: str,
     ) -> tuple[MarketBar, ...]:
         self._require_tiingo_json(raw)
@@ -45,7 +45,7 @@ class TiingoNormalizer:
         for row in payload:
             bars.append(
                 MarketBar(
-                    company_id=company_id,
+                    security_id=security_id,
                     ticker=normalized_ticker,
                     date=date.fromisoformat(str(row["date"])[:10]),
                     open=self._decimal(row["open"]),

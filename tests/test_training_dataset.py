@@ -18,6 +18,7 @@ class _FakeSnapshotBuilder:
         return CandidateSnapshot(
             event_id=event.event_id,
             company_id=event.company_id,
+            security_id="security_example",
             decision_time=event.public_time,
             decision_market_date=date(2026, 8, 7),
             execution_date=date(2026, 8, 10),

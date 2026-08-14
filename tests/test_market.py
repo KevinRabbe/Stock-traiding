@@ -27,6 +27,7 @@ from stock_trading.market import (
     build_forward_label,
     conservative_first_tradable_time,
     normalize_tiingo_ticker,
+    tiingo_security_id,
 )
 
 
@@ -43,7 +44,7 @@ def _raw_json(record_id: str, payload) -> RawRecord:
 
 
 def _bar(
-    company_id: str,
+    security_id: str,
     ticker: str,
     day: date,
     open_: str,
@@ -54,7 +55,7 @@ def _bar(
     volume: str = "1000000",
 ) -> MarketBar:
     return MarketBar(
-        company_id=company_id,
+        security_id=security_id,
         ticker=ticker,
         date=day,
         open=Decimal(open_),
@@ -101,7 +102,7 @@ def _insider_event(company_id: str, public_time: datetime) -> Event:
 
 
 def test_tiingo_normalizer_preserves_raw_adjusted_and_corporate_actions() -> None:
-    company_id = company_id_from_sec_cik("12345")
+    security_id = "security_example"
     payload = [
         {
             "date": "2026-08-10T00:00:00.000Z",
@@ -121,11 +122,12 @@ def test_tiingo_normalizer_preserves_raw_adjusted_and_corporate_actions() -> Non
     ]
     bars = TiingoNormalizer().parse_prices(
         _raw_json("prices:EXM", payload),
-        company_id=company_id,
+        security_id=security_id,
         ticker="EXM",
     )
 
     assert len(bars) == 1
+    assert bars[0].security_id == security_id
     assert bars[0].close == Decimal("108")
     assert bars[0].adj_close == Decimal("54")
     assert bars[0].dividend_cash == Decimal("0.25")
@@ -163,6 +165,7 @@ def test_tiingo_metadata_requires_explicit_entity_resolution() -> None:
     assert resolution.resolved
     assert resolution.mapping is not None
     assert resolution.mapping.company_id == company_id_from_sec_cik("12345")
+    assert resolution.mapping.security_id == tiingo_security_id("EXM", date(2012, 1, 3))
     assert resolution.mapping.contains(date(2020, 1, 2))
 
 
@@ -185,11 +188,44 @@ def test_tiingo_resolution_rejects_recycled_symbol_history() -> None:
     assert resolution.reason == "observation_predates_tiingo_history"
 
 
-def test_security_registry_blocks_overlapping_ticker_reuse() -> None:
+def test_security_registry_allows_legal_successors_to_share_one_security() -> None:
+    registry = SecurityRegistry()
+    shared_security = "security_shared"
+    registry.add(
+        SecurityMapping(
+            company_id="cmp_a",
+            security_id=shared_security,
+            ticker="ABC",
+            valid_from=date(2010, 1, 1),
+            valid_to=None,
+        )
+    )
+    registry.add(
+        SecurityMapping(
+            company_id="cmp_b",
+            security_id=shared_security,
+            ticker="ABC",
+            valid_from=date(2010, 1, 1),
+            valid_to=None,
+        )
+    )
+
+    assert registry.security_for_ticker("ABC", date(2020, 1, 1)) == shared_security
+    assert registry.security_for_company("cmp_a", date(2020, 1, 1)) == shared_security
+    assert registry.companies_for_security(shared_security, date(2020, 1, 1)) == (
+        "cmp_a",
+        "cmp_b",
+    )
+    with pytest.raises(ValueError, match="multiple companies"):
+        registry.company_for_ticker("ABC", date(2020, 1, 1))
+
+
+def test_security_registry_blocks_overlapping_ticker_reuse_by_different_security() -> None:
     registry = SecurityRegistry()
     registry.add(
         SecurityMapping(
             company_id="cmp_a",
+            security_id="security_old",
             ticker="ABC",
             valid_from=date(2010, 1, 1),
             valid_to=date(2020, 12, 31),
@@ -198,19 +234,21 @@ def test_security_registry_blocks_overlapping_ticker_reuse() -> None:
     registry.add(
         SecurityMapping(
             company_id="cmp_b",
+            security_id="security_new",
             ticker="ABC",
             valid_from=date(2021, 1, 1),
             valid_to=None,
         )
     )
 
-    assert registry.company_for_ticker("ABC", date(2015, 1, 1)) == "cmp_a"
-    assert registry.company_for_ticker("ABC", date(2025, 1, 1)) == "cmp_b"
+    assert registry.security_for_ticker("ABC", date(2015, 1, 1)) == "security_old"
+    assert registry.security_for_ticker("ABC", date(2025, 1, 1)) == "security_new"
 
     with pytest.raises(ValueError, match="overlaps"):
         registry.add(
             SecurityMapping(
                 company_id="cmp_c",
+                security_id="security_conflict",
                 ticker="ABC",
                 valid_from=date(2020, 6, 1),
                 valid_to=date(2021, 6, 1),
@@ -220,12 +258,12 @@ def test_security_registry_blocks_overlapping_ticker_reuse() -> None:
 
 def test_forward_label_uses_adjusted_open_close_and_excursions() -> None:
     stock = [
-        _bar("cmp_stock", "AAA", date(2026, 8, 10), "100", "105", "107", "98"),
-        _bar("cmp_stock", "AAA", date(2026, 8, 11), "105", "110", "112", "103"),
+        _bar("security_stock", "AAA", date(2026, 8, 10), "100", "105", "107", "98"),
+        _bar("security_stock", "AAA", date(2026, 8, 11), "105", "110", "112", "103"),
     ]
     benchmark = [
-        _bar("cmp_spy", "SPY", date(2026, 8, 10), "100", "101", "102", "99"),
-        _bar("cmp_spy", "SPY", date(2026, 8, 11), "101", "102", "103", "100"),
+        _bar("security_spy", "SPY", date(2026, 8, 10), "100", "101", "102", "99"),
+        _bar("security_spy", "SPY", date(2026, 8, 11), "101", "102", "103", "100"),
     ]
 
     label = build_forward_label(stock, benchmark, horizon=2)
@@ -249,56 +287,67 @@ def test_tiingo_symbol_normalization_matches_documented_dash_style() -> None:
 
 def test_market_store_returns_typed_actual_bars_and_excludes_decision_day(tmp_path) -> None:
     pytest.importorskip("duckdb")
-    company_id = company_id_from_sec_cik("12345")
+    security_id = "security_example"
     bars = [
-        _bar(company_id, "EXM", date(2026, 8, 6), "10", "10.5", "10.8", "9.9"),
-        _bar(company_id, "EXM", date(2026, 8, 7), "10.6", "11", "11.2", "10.5"),
-        _bar(company_id, "EXM", date(2026, 8, 10), "11.1", "11.4", "11.5", "11"),
+        _bar(security_id, "EXM", date(2026, 8, 6), "10", "10.5", "10.8", "9.9"),
+        _bar(security_id, "EXM", date(2026, 8, 7), "10.6", "11", "11.2", "10.5"),
+        _bar(security_id, "EXM", date(2026, 8, 10), "11.1", "11.4", "11.5", "11"),
     ]
     store = DuckDbMarketStore(tmp_path / "market.duckdb")
     store.put_many(bars)
     store.put_many(bars)
 
-    next_bar = store.next_bar_after(company_id, date(2026, 8, 7))
+    next_bar = store.next_bar_after(security_id, date(2026, 8, 7))
     assert isinstance(next_bar, MarketBar)
     assert next_bar.date == date(2026, 8, 10)
-    assert [bar.date for bar in store.bars_before(company_id, date(2026, 8, 7), 10)] == [
+    assert [bar.date for bar in store.bars_before(security_id, date(2026, 8, 7), 10)] == [
         date(2026, 8, 6)
     ]
 
 
-def test_snapshot_builder_keeps_same_day_eod_data_out_of_features(tmp_path) -> None:
+def test_snapshot_builder_resolves_company_to_security_and_excludes_same_day_eod(tmp_path) -> None:
     pytest.importorskip("duckdb")
-    stock_id = company_id_from_sec_cik("12345")
-    benchmark_id = "cmp_spy"
+    company_id = company_id_from_sec_cik("12345")
+    stock_security_id = "security_stock"
+    benchmark_security_id = "security_spy"
     store = DuckDbMarketStore(tmp_path / "market.duckdb")
+    store.register_mapping(
+        SecurityMapping(
+            company_id=company_id,
+            security_id=stock_security_id,
+            ticker="EXM",
+            valid_from=date(2010, 1, 1),
+            valid_to=None,
+        )
+    )
 
     stock_bars = [
-        _bar(stock_id, "EXM", date(2026, 8, 5), "99", "100", "101", "98"),
-        _bar(stock_id, "EXM", date(2026, 8, 6), "100", "101", "102", "99"),
-        _bar(stock_id, "EXM", date(2026, 8, 7), "101", "150", "151", "100"),
-        _bar(stock_id, "EXM", date(2026, 8, 10), "102", "104", "105", "101"),
-        _bar(stock_id, "EXM", date(2026, 8, 11), "104", "106", "107", "103"),
+        _bar(stock_security_id, "EXM", date(2026, 8, 5), "99", "100", "101", "98"),
+        _bar(stock_security_id, "EXM", date(2026, 8, 6), "100", "101", "102", "99"),
+        _bar(stock_security_id, "EXM", date(2026, 8, 7), "101", "150", "151", "100"),
+        _bar(stock_security_id, "EXM", date(2026, 8, 10), "102", "104", "105", "101"),
+        _bar(stock_security_id, "EXM", date(2026, 8, 11), "104", "106", "107", "103"),
     ]
     benchmark_bars = [
-        _bar(benchmark_id, "SPY", date(2026, 8, 5), "100", "100", "101", "99"),
-        _bar(benchmark_id, "SPY", date(2026, 8, 6), "100", "100", "101", "99"),
-        _bar(benchmark_id, "SPY", date(2026, 8, 7), "100", "120", "121", "99"),
-        _bar(benchmark_id, "SPY", date(2026, 8, 10), "100", "101", "102", "99"),
-        _bar(benchmark_id, "SPY", date(2026, 8, 11), "101", "102", "103", "100"),
+        _bar(benchmark_security_id, "SPY", date(2026, 8, 5), "100", "100", "101", "99"),
+        _bar(benchmark_security_id, "SPY", date(2026, 8, 6), "100", "100", "101", "99"),
+        _bar(benchmark_security_id, "SPY", date(2026, 8, 7), "100", "120", "121", "99"),
+        _bar(benchmark_security_id, "SPY", date(2026, 8, 10), "100", "101", "102", "99"),
+        _bar(benchmark_security_id, "SPY", date(2026, 8, 11), "101", "102", "103", "100"),
     ]
     store.put_many(stock_bars + benchmark_bars)
 
     public_time = datetime(2026, 8, 7, 14, 0, tzinfo=timezone.utc)
-    event = _insider_event(stock_id, public_time)
+    event = _insider_event(company_id, public_time)
     builder = CandidateSnapshotBuilder(
         store,
-        benchmark_company_id=benchmark_id,
+        benchmark_security_id=benchmark_security_id,
         feature_lookback_bars=260,
         label_horizons=(1, 2),
     )
 
     snapshot = builder.build(event)
+    assert snapshot.security_id == stock_security_id
     assert snapshot.execution_date == date(2026, 8, 10)
     assert snapshot.first_tradable_time == datetime(2026, 8, 10, 13, 30, tzinfo=timezone.utc)
     assert snapshot.market_features["market.return_1d"] == pytest.approx(0.01)

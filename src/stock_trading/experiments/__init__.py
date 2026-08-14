@@ -6,6 +6,10 @@ _EXPORTS = {
     "HistoricalExperimentConfig": (".lightgbm", "HistoricalExperimentConfig"),
     "HistoricalExperimentResult": (".lightgbm", "HistoricalExperimentResult"),
     "LightGbmDiagnosticsResult": (".lightgbm_diagnostics", "LightGbmDiagnosticsResult"),
+    "PermutationNullResult": (
+        ".lightgbm_permutation_null",
+        "PermutationNullResult",
+    ),
     "ValidationRankBacktestResult": (
         ".lightgbm_validation_rank",
         "ValidationRankBacktestResult",
@@ -18,6 +22,10 @@ _EXPORTS = {
     "populate_sec_and_market": (".prepare", "populate_sec_and_market"),
     "run_historical_experiment": (".lightgbm", "run_historical_experiment"),
     "run_lightgbm_diagnostics": (".lightgbm_diagnostics", "run_lightgbm_diagnostics"),
+    "run_permutation_null_test": (
+        ".lightgbm_permutation_null",
+        "run_permutation_null_test",
+    ),
     "run_validation_rank_backtest": (
         ".lightgbm_validation_rank",
         "run_validation_rank_backtest",

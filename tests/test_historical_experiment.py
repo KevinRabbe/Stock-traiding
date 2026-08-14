@@ -16,6 +16,7 @@ from stock_trading.experiments import (
     HistoricalExperimentConfig,
     run_historical_experiment,
     run_lightgbm_diagnostics,
+    run_permutation_null_test,
     run_validation_rank_backtest,
 )
 from stock_trading.market import DuckDbMarketStore, MarketBar, SecurityMapping
@@ -199,3 +200,22 @@ def test_historical_experiment_runs_from_stores_to_report(tmp_path) -> None:
     assert ranked_payload["selection_policy"]["validation_top_fraction"] == 0.25
     assert ranked_payload["years"][0]["test_year"] == 2024
     assert ranked_payload["years"][0]["validation_selected_count"] >= 1
+
+    null_result = run_permutation_null_test(
+        output,
+        permutations=8,
+        seed=7,
+        validation_top_fraction=0.25,
+    )
+    assert null_result.training_row_count == 12
+    assert null_result.model_years == (2024,)
+    assert null_result.permutations == 8
+    null_payload = json.loads(null_result.output_path.read_text(encoding="utf-8"))
+    assert null_payload["schema_version"] == "lightgbm-permutation-null-v1"
+    assert null_payload["null_design"]["permutations"] == 8
+    assert null_payload["null_design"]["seed"] == 7
+    assert null_payload["years"][0]["year"] == 2024
+    return_null = null_payload["null"]["compounded_return"]
+    assert return_null["count"] == 8
+    assert 0.0 <= return_null["observed_percentile"] <= 1.0
+    assert 0.0 < return_null["one_sided_p_value"] <= 1.0

@@ -4,6 +4,7 @@ import json
 from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from pathlib import Path
+from time import perf_counter
 
 from stock_trading.backtest import (
     BacktestConfig,
@@ -48,6 +49,8 @@ class HistoricalExperimentConfig:
     min_validation_rows: int = 20
     min_test_rows: int = 1
     top_feature_count: int = 30
+    market_read_cache_series: int = 8
+    hash_input_databases: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +63,8 @@ class HistoricalExperimentResult:
     training_row_count: int
     tested_years: tuple[int, ...]
     output_dir: Path
+    timings_seconds: dict[str, float]
+    market_cache_stats: dict[str, int]
 
 
 def run_historical_experiment(
@@ -68,11 +73,15 @@ def run_historical_experiment(
     training_config: LightGbmTrainingConfig | None = None,
     backtest_config: BacktestConfig | None = None,
 ) -> HistoricalExperimentResult:
+    total_started = perf_counter()
     output = config.output_dir
     output.mkdir(parents=True, exist_ok=True)
 
+    load_started = perf_counter()
     event_store = DuckDbEventStore(config.events_db)
     market_store = DuckDbMarketStore(config.market_db)
+    if config.market_read_cache_series > 0:
+        market_store.enable_read_cache(max_series=config.market_read_cache_series)
     source_event_count = event_store.count()
     mapped_company_ids = _mapped_company_ids(market_store)
     if not mapped_company_ids:
@@ -92,7 +101,9 @@ def run_historical_experiment(
         for event in all_events
         if event.company_id and event.event_type in _MODEL_EVENT_TYPES
     )
+    load_seconds = perf_counter() - load_started
 
+    dataset_started = perf_counter()
     snapshot_builder = CandidateSnapshotBuilder(
         market_store,
         benchmark_security_id=config.benchmark_company_id,
@@ -107,13 +118,17 @@ def run_historical_experiment(
     rows = dataset_builder.build(trigger_events, all_events=all_events)
     if not rows:
         raise ValueError("no mature model-ready rows could be built from the supplied stores")
+    dataset_seconds = perf_counter() - dataset_started
 
     aggregated_trigger_event_count = sum(len(row.trigger_event_ids) for row in rows)
     max_triggers_per_opportunity = max(len(row.trigger_event_ids) for row in rows)
     mean_triggers_per_opportunity = aggregated_trigger_event_count / len(rows)
 
+    artifact_started = perf_counter()
     _write_training_rows(output / "training_rows.jsonl", rows)
+    artifact_seconds = perf_counter() - artifact_started
 
+    train_started = perf_counter()
     effective_training_config = training_config or LightGbmTrainingConfig()
     trainer = LightGbmTrainer(effective_training_config)
     backtester = FixedAllocationBacktester(backtest_config)
@@ -169,15 +184,35 @@ def run_historical_experiment(
                 "profit_without_best_10": profit_without_best_trades(portfolio, 10),
             }
         )
+    train_backtest_seconds = perf_counter() - train_started
 
     summary = summarize_walk_forward(walk_results)
+    market_cache_stats = market_store.read_cache_stats()
+    timings_seconds = {
+        "load_selected_events": load_seconds,
+        "build_opportunity_dataset": dataset_seconds,
+        "write_training_rows": artifact_seconds,
+        "train_and_backtest": train_backtest_seconds,
+        "pipeline_before_report": perf_counter() - total_started,
+    }
+    events_stat = config.events_db.stat()
+    market_stat = config.market_db.stat()
     report = {
         "schema_version": "historical-lightgbm-v3-opportunity",
         "inputs": {
             "events_db": str(config.events_db),
-            "events_db_sha256": _sha256_file(config.events_db),
+            "events_db_size_bytes": events_stat.st_size,
+            "events_db_mtime_ns": events_stat.st_mtime_ns,
+            "events_db_sha256": (
+                _sha256_file(config.events_db) if config.hash_input_databases else None
+            ),
             "market_db": str(config.market_db),
-            "market_db_sha256": _sha256_file(config.market_db),
+            "market_db_size_bytes": market_stat.st_size,
+            "market_db_mtime_ns": market_stat.st_mtime_ns,
+            "market_db_sha256": (
+                _sha256_file(config.market_db) if config.hash_input_databases else None
+            ),
+            "strong_input_hashes": config.hash_input_databases,
             "benchmark_security_id": config.benchmark_company_id,
         },
         "dataset": {
@@ -194,6 +229,10 @@ def run_historical_experiment(
             "decision_end": max(row.decision_time for row in rows).isoformat(),
             "positive_alpha_threshold": config.positive_alpha_threshold,
             "target_horizon": config.target_horizon,
+        },
+        "performance": {
+            "market_read_cache": market_cache_stats,
+            "timings_seconds": timings_seconds,
         },
         "training_config": _jsonable(effective_training_config),
         "backtest_config": _jsonable(backtest_config or BacktestConfig()),
@@ -214,6 +253,8 @@ def run_historical_experiment(
         training_row_count=len(rows),
         tested_years=tuple(split.test_year for split in splits),
         output_dir=output,
+        timings_seconds=timings_seconds,
+        market_cache_stats=market_cache_stats,
     )
 
 
@@ -273,6 +314,17 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--first-test-year", type=int)
     parser.add_argument("--min-train-rows", type=int, default=100)
     parser.add_argument("--min-validation-rows", type=int, default=20)
+    parser.add_argument(
+        "--market-read-cache-series",
+        type=int,
+        default=8,
+        help="Number of complete security histories kept in the PIT read cache; 0 disables it.",
+    )
+    parser.add_argument(
+        "--strong-input-hashes",
+        action="store_true",
+        help="Hash entire input DuckDB files for reproducibility (slower on large databases).",
+    )
     parser.add_argument("--starting-capital", type=float, default=10_000.0)
     parser.add_argument("--allocation-pct", type=float, default=0.02)
     parser.add_argument("--max-open-positions", type=int, default=15)
@@ -291,6 +343,8 @@ def main() -> None:
             first_test_year=args.first_test_year,
             min_train_rows=args.min_train_rows,
             min_validation_rows=args.min_validation_rows,
+            market_read_cache_series=args.market_read_cache_series,
+            hash_input_databases=args.strong_input_hashes,
         ),
         backtest_config=BacktestConfig(
             starting_capital=args.starting_capital,
@@ -310,6 +364,8 @@ def main() -> None:
                 "opportunity_row_count": result.training_row_count,
                 "training_row_count": result.training_row_count,
                 "tested_years": result.tested_years,
+                "timings_seconds": result.timings_seconds,
+                "market_cache_stats": result.market_cache_stats,
                 "output_dir": str(result.output_dir),
             },
             indent=2,

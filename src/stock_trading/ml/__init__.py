@@ -10,6 +10,9 @@ from .lightgbm_models import (
     LightGbmTrainer,
     LightGbmTrainingConfig,
     OpportunityPrediction,
+    ProfitLightGbmModelBundle,
+    ProfitLightGbmTrainer,
+    ProfitPrediction,
 )
 
 __all__ = [
@@ -18,6 +21,9 @@ __all__ = [
     "LightGbmTrainer",
     "LightGbmTrainingConfig",
     "OpportunityPrediction",
+    "ProfitLightGbmModelBundle",
+    "ProfitLightGbmTrainer",
+    "ProfitPrediction",
     "TrainingDatasetBuilder",
     "TrainingRow",
     "build_opportunity_trigger_features",

@@ -24,6 +24,8 @@ class HistoricalUniverseResult:
     selected_companies: int
     selected_tickers: int
     excluded_existing_companies: int
+    excluded_manifest_companies: int
+    excluded_total_companies: int
     candidate_companies: int
 
 
@@ -33,6 +35,7 @@ def build_historical_universe(
     max_companies: int,
     seed: str = "historical-holdout-v1",
     exclude_market_db: Path | None = None,
+    exclude_universe_manifests: tuple[Path, ...] = (),
     output_path: Path | None = None,
 ) -> HistoricalUniverseResult:
     """Select a deterministic SEC-company sample without looking at market outcomes.
@@ -45,6 +48,11 @@ def build_historical_universe(
 
     ``exclude_market_db`` is intended for a fresh holdout universe: any company
     already mapped in that DuckDB market store is removed before sampling.
+
+    ``exclude_universe_manifests`` makes sequential holdouts disjoint even when a
+    previously selected company could not be mapped into the market database. Every
+    canonical company ID in each supplied historical-universe manifest is excluded
+    before ranking the new candidate set.
     """
 
     if max_companies <= 0:
@@ -61,7 +69,12 @@ def build_historical_universe(
         by_company.setdefault(company_id, []).append(observation)
         sec_cik_by_company[company_id] = observation.sec_cik
 
-    excluded_company_ids = _mapped_company_ids(exclude_market_db)
+    existing_company_ids = _mapped_company_ids(exclude_market_db)
+    manifest_company_ids: set[str] = set()
+    for manifest_path in exclude_universe_manifests:
+        manifest_company_ids.update(load_historical_universe_company_ids(manifest_path))
+    excluded_company_ids = existing_company_ids | manifest_company_ids
+
     candidates = [
         company_id for company_id in by_company if company_id not in excluded_company_ids
     ]
@@ -104,6 +117,11 @@ def build_historical_universe(
             }
         )
 
+    available_company_ids = set(by_company)
+    excluded_existing_companies = len(existing_company_ids & available_company_ids)
+    excluded_manifest_companies = len(manifest_company_ids & available_company_ids)
+    excluded_total_companies = len(excluded_company_ids & available_company_ids)
+
     output_path = output_path or data_root / "manifests" / "historical_holdout_universe.json"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -116,13 +134,16 @@ def build_historical_universe(
         "snapshot_start_quarter": f"{snapshot.start_year}Q{snapshot.start_quarter}",
         "snapshot_end_quarter": f"{snapshot.end_year}Q{snapshot.end_quarter}",
         "candidate_companies": len(candidates),
-        "excluded_existing_companies": len(excluded_company_ids & set(by_company)),
+        "excluded_existing_companies": excluded_existing_companies,
+        "excluded_manifest_companies": excluded_manifest_companies,
+        "excluded_total_companies": excluded_total_companies,
         "selected_companies": len(companies),
         "selected_unique_tickers": len(selected_tickers),
         "first_observed_year_counts": {
             str(year): count for year, count in sorted(first_year_counts.items())
         },
         "exclude_market_db": str(exclude_market_db) if exclude_market_db is not None else None,
+        "exclude_universe_manifests": [str(path) for path in exclude_universe_manifests],
         "companies": companies,
     }
     output_path.write_text(
@@ -133,7 +154,9 @@ def build_historical_universe(
         output_path=output_path,
         selected_companies=len(companies),
         selected_tickers=len(selected_tickers),
-        excluded_existing_companies=len(excluded_company_ids & set(by_company)),
+        excluded_existing_companies=excluded_existing_companies,
+        excluded_manifest_companies=excluded_manifest_companies,
+        excluded_total_companies=excluded_total_companies,
         candidate_companies=len(candidates),
     )
 
@@ -160,10 +183,7 @@ def _mapped_company_ids(market_db: Path | None) -> set[str]:
     if market_db is None or not market_db.exists():
         return set()
     with duckdb.connect(str(market_db), read_only=True) as connection:
-        tables = {
-            str(row[0])
-            for row in connection.execute("SHOW TABLES").fetchall()
-        }
+        tables = {str(row[0]) for row in connection.execute("SHOW TABLES").fetchall()}
         if "company_security_map" not in tables:
             return set()
         rows = connection.execute(
@@ -191,6 +211,17 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="Exclude companies already mapped in this market DuckDB.",
     )
+    parser.add_argument(
+        "--exclude-universe-manifest",
+        dest="exclude_universe_manifests",
+        action="append",
+        type=Path,
+        default=[],
+        help=(
+            "Exclude every company selected by a prior historical-universe manifest. "
+            "Repeat this option to exclude multiple prior holdouts."
+        ),
+    )
     parser.add_argument("--output", type=Path)
     return parser
 
@@ -202,6 +233,7 @@ def main() -> None:
         max_companies=args.max_companies,
         seed=args.seed,
         exclude_market_db=args.exclude_market_db,
+        exclude_universe_manifests=tuple(args.exclude_universe_manifests),
         output_path=args.output,
     )
     print(json.dumps({**asdict(result), "output_path": str(result.output_path)}, indent=2))

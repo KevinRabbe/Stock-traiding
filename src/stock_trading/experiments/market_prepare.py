@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import date, timedelta
@@ -18,6 +19,7 @@ from stock_trading.market import (
     TiingoNormalizer,
     normalize_tiingo_ticker,
 )
+from stock_trading.market.tiingo import TiingoAccountError
 from stock_trading.storage import FileRawStore
 
 from .historical_universe import load_historical_universe_company_ids
@@ -25,6 +27,7 @@ from .sec_snapshot import load_sec_universe_snapshot
 
 
 BENCHMARK_SPY_SECURITY_ID = "benchmark_spy"
+DEFAULT_RATE_LIMIT_WAIT_SECONDS = 3600
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,6 +284,30 @@ def _jsonable(value):
     return value
 
 
+def _retry_delay_seconds(error: TiingoAccountError) -> int:
+    if error.retry_after:
+        try:
+            return max(1, int(error.retry_after))
+        except ValueError:
+            pass
+    return DEFAULT_RATE_LIMIT_WAIT_SECONDS
+
+
+def _run_with_rate_limit_resume(operation, *, wait_on_rate_limit: bool, sleep_fn=time.sleep):
+    while True:
+        try:
+            return operation()
+        except TiingoAccountError as exc:
+            if exc.status_code != 429 or not wait_on_rate_limit:
+                raise
+            delay_seconds = _retry_delay_seconds(exc)
+            print(
+                f"{exc} Sleeping {delay_seconds} seconds, then resuming from cached progress.",
+                flush=True,
+            )
+            sleep_fn(delay_seconds)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Populate verified Tiingo EOD history from a cached SEC issuer snapshot."
@@ -288,6 +315,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--data-root", type=Path, default=Path("data"))
     parser.add_argument("--market-start", type=date.fromisoformat)
     parser.add_argument("--market-end", type=date.fromisoformat)
+    parser.add_argument(
+        "--wait-on-rate-limit",
+        action="store_true",
+        help=(
+            "Keep the process alive on Tiingo HTTP 429, wait for Retry-After or one hour, "
+            "and resume from cached progress automatically."
+        ),
+    )
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--max-unique-tickers", type=int)
     selection.add_argument(
@@ -315,14 +350,17 @@ def main() -> None:
         raise SystemExit(str(exc)) from exc
 
     with TiingoClient(credentials.token) as tiingo_client:
-        result = populate_market_from_snapshot(
-            args.data_root,
-            tiingo_client=tiingo_client,
-            market_start=args.market_start,
-            market_end=args.market_end,
-            max_unique_tickers=args.max_unique_tickers,
-            tickers=tuple(args.tickers) if args.tickers else None,
-            universe_manifest=args.universe_manifest,
+        result = _run_with_rate_limit_resume(
+            lambda: populate_market_from_snapshot(
+                args.data_root,
+                tiingo_client=tiingo_client,
+                market_start=args.market_start,
+                market_end=args.market_end,
+                max_unique_tickers=args.max_unique_tickers,
+                tickers=tuple(args.tickers) if args.tickers else None,
+                universe_manifest=args.universe_manifest,
+            ),
+            wait_on_rate_limit=args.wait_on_rate_limit,
         )
     print(json.dumps(_jsonable(asdict(result)), indent=2, sort_keys=True))
 

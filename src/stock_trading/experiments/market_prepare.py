@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import date, timedelta
@@ -10,6 +9,7 @@ from pathlib import Path
 
 from stock_trading.core import Source
 from stock_trading.entities import company_id_from_sec_cik
+from stock_trading.local_secrets import load_tiingo_credentials
 from stock_trading.market import (
     DuckDbMarketStore,
     IssuerObservation,
@@ -309,11 +309,12 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _parser().parse_args()
-    token = os.environ.get("TIINGO_API_TOKEN", "").strip()
-    if not token:
-        raise SystemExit("TIINGO_API_TOKEN environment variable is required")
+    try:
+        credentials = load_tiingo_credentials(args.data_root)
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
 
-    with TiingoClient(token) as tiingo_client:
+    with TiingoClient(credentials.token) as tiingo_client:
         result = populate_market_from_snapshot(
             args.data_root,
             tiingo_client=tiingo_client,

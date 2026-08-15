@@ -9,6 +9,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from stock_trading.core import Source
+from stock_trading.entities import company_id_from_sec_cik
 from stock_trading.market import (
     DuckDbMarketStore,
     IssuerObservation,
@@ -19,6 +20,7 @@ from stock_trading.market import (
 )
 from stock_trading.storage import FileRawStore
 
+from .historical_universe import load_historical_universe_company_ids
 from .sec_snapshot import load_sec_universe_snapshot
 
 
@@ -57,17 +59,36 @@ def populate_market_from_snapshot(
     market_end: date | None = None,
     max_unique_tickers: int | None = None,
     tickers: tuple[str, ...] | None = None,
+    universe_manifest: Path | None = None,
 ) -> MarketOnlyResult:
     if max_unique_tickers is not None and max_unique_tickers <= 0:
         raise ValueError("max_unique_tickers must be > 0")
-    if max_unique_tickers is not None and tickers:
-        raise ValueError("tickers and max_unique_tickers are mutually exclusive")
+    selection_count = sum(
+        value is not None and value != ()
+        for value in (max_unique_tickers, tickers, universe_manifest)
+    )
+    if selection_count > 1:
+        raise ValueError(
+            "max_unique_tickers, tickers and universe_manifest are mutually exclusive"
+        )
 
     snapshot, all_observations = load_sec_universe_snapshot(data_root)
-    observations, selected_unique_tickers, requested, missing = _select_observations(
+    requested_company_ids = (
+        load_historical_universe_company_ids(universe_manifest)
+        if universe_manifest is not None
+        else None
+    )
+    (
+        observations,
+        selected_unique_tickers,
+        requested,
+        missing,
+        missing_companies,
+    ) = _select_observations(
         all_observations,
         max_unique_tickers=max_unique_tickers,
         requested_tickers=tickers,
+        requested_company_ids=requested_company_ids,
     )
 
     default_market_start = date(snapshot.start_year, 1, 1) - timedelta(days=400)
@@ -158,6 +179,9 @@ def populate_market_from_snapshot(
         "market_end": market_end.isoformat(),
         "requested_tickers": list(requested),
         "missing_requested_tickers": list(missing),
+        "universe_manifest": str(universe_manifest) if universe_manifest is not None else None,
+        "requested_companies": len(requested_company_ids or ()),
+        "missing_requested_companies": list(missing_companies),
         "unresolved_reason_counts": dict(sorted(reason_counts.items())),
     }
     (manifests_dir / "market_only.json").write_text(
@@ -172,9 +196,41 @@ def _select_observations(
     *,
     max_unique_tickers: int | None,
     requested_tickers: tuple[str, ...] | None,
-) -> tuple[tuple[IssuerObservation, ...], int, tuple[str, ...], tuple[str, ...]]:
-    if max_unique_tickers is not None and requested_tickers:
-        raise ValueError("tickers and max_unique_tickers are mutually exclusive")
+    requested_company_ids: tuple[str, ...] | None = None,
+) -> tuple[
+    tuple[IssuerObservation, ...],
+    int,
+    tuple[str, ...],
+    tuple[str, ...],
+    tuple[str, ...],
+]:
+    selection_count = sum(
+        value is not None and value != ()
+        for value in (max_unique_tickers, requested_tickers, requested_company_ids)
+    )
+    if selection_count > 1:
+        raise ValueError(
+            "requested_company_ids, requested_tickers and max_unique_tickers are mutually exclusive"
+        )
+
+    if requested_company_ids:
+        requested_company_ids = tuple(dict.fromkeys(requested_company_ids))
+        requested_set = set(requested_company_ids)
+        selected = tuple(
+            observation
+            for observation in observations
+            if company_id_from_sec_cik(observation.sec_cik) in requested_set
+        )
+        present = {
+            company_id_from_sec_cik(observation.sec_cik) for observation in selected
+        }
+        missing_companies = tuple(
+            company_id for company_id in requested_company_ids if company_id not in present
+        )
+        selected_unique_tickers = len(
+            {_normalized_ticker(item.ticker) for item in selected}
+        )
+        return selected, selected_unique_tickers, (), (), missing_companies
 
     if requested_tickers:
         requested = tuple(
@@ -192,7 +248,7 @@ def _select_observations(
                 selected.append(observation)
                 present.add(ticker)
         missing = tuple(ticker for ticker in requested if ticker not in present)
-        return tuple(selected), len(present), requested, missing
+        return tuple(selected), len(present), requested, missing, ()
 
     selected = observations
     if max_unique_tickers is not None:
@@ -208,7 +264,7 @@ def _select_observations(
         )
 
     selected_unique_tickers = len({_normalized_ticker(item.ticker) for item in selected})
-    return selected, selected_unique_tickers, (), ()
+    return selected, selected_unique_tickers, (), (), ()
 
 
 def _normalized_ticker(value: str) -> str:
@@ -240,6 +296,14 @@ def _parser() -> argparse.ArgumentParser:
         metavar="TICKER",
         help="Populate only these explicit SEC-observed tickers, e.g. AAPL MSFT NVDA.",
     )
+    selection.add_argument(
+        "--universe-manifest",
+        type=Path,
+        help=(
+            "Historical universe JSON produced by experiments.historical_universe; "
+            "all SEC-observed tickers for those canonical companies are retained."
+        ),
+    )
     return parser
 
 
@@ -257,6 +321,7 @@ def main() -> None:
             market_end=args.market_end,
             max_unique_tickers=args.max_unique_tickers,
             tickers=tuple(args.tickers) if args.tickers else None,
+            universe_manifest=args.universe_manifest,
         )
     print(json.dumps(_jsonable(asdict(result)), indent=2, sort_keys=True))
 

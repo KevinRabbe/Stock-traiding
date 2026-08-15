@@ -9,6 +9,8 @@ from stock_trading.ml import (
     LightGbmModelBundle,
     LightGbmTrainer,
     LightGbmTrainingConfig,
+    ProfitLightGbmModelBundle,
+    ProfitLightGbmTrainer,
     TrainingRow,
 )
 from stock_trading.ml.lightgbm_models import _company_balanced_weights
@@ -105,6 +107,51 @@ def test_lightgbm_bundle_learns_signal_and_round_trips(tmp_path) -> None:
     assert reloaded.probability_positive_alpha == pytest.approx(
         high.probability_positive_alpha
     )
+
+
+def test_profit_lightgbm_bundle_targets_realized_stock_return_and_round_trips(tmp_path) -> None:
+    rows = tuple(_row(index) for index in range(100))
+    trainer = ProfitLightGbmTrainer(
+        LightGbmTrainingConfig(
+            num_boost_round=80,
+            early_stopping_rounds=10,
+            learning_rate=0.1,
+            num_leaves=7,
+            min_data_in_leaf=3,
+            feature_fraction=1.0,
+            bagging_fraction=1.0,
+            bagging_freq=0,
+            downside_penalty=0.5,
+            seed=7,
+        )
+    )
+    bundle = trainer.train(
+        rows[:80],
+        rows[80:],
+        profitable_return_threshold=0.002,
+    )
+
+    low = bundle.predict({"signal": 0.05, "sometimes_missing": None})
+    high = bundle.predict({"signal": 0.95, "sometimes_missing": 1.9})
+
+    assert high.expected_stock_return_20d > low.expected_stock_return_20d
+    assert high.probability_profitable_return > low.probability_profitable_return
+    assert high.expected_downside_20d < low.expected_downside_20d
+    assert high.profit_score > low.profit_score
+    assert set(bundle.feature_importance()) == {"signal", "sometimes_missing"}
+
+    bundle.save(tmp_path / "profit-model")
+    loaded = ProfitLightGbmModelBundle.load(tmp_path / "profit-model")
+    reloaded = loaded.predict({"signal": 0.95, "sometimes_missing": 1.9})
+
+    assert reloaded.expected_stock_return_20d == pytest.approx(
+        high.expected_stock_return_20d
+    )
+    assert reloaded.expected_downside_20d == pytest.approx(high.expected_downside_20d)
+    assert reloaded.probability_profitable_return == pytest.approx(
+        high.probability_profitable_return
+    )
+    assert reloaded.profit_score == pytest.approx(high.profit_score)
 
 
 def test_walk_forward_excludes_labels_not_mature_by_test_year() -> None:

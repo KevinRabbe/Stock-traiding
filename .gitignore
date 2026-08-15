@@ -18,6 +18,7 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+data/local/secrets.json
 
 # Local data and model artifacts
 data/raw/

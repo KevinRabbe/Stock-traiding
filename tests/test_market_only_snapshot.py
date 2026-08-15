@@ -4,6 +4,7 @@ import zipfile
 from datetime import datetime, timezone
 
 from stock_trading.core import RawRecord, Source, content_sha256
+from stock_trading.entities import company_id_from_sec_cik
 from stock_trading.experiments.market_prepare import _parser as market_parser
 from stock_trading.experiments.market_prepare import _select_observations
 from stock_trading.experiments.sec_snapshot import (
@@ -156,7 +157,7 @@ def test_market_only_cli_needs_no_sec_identity_and_selection_is_deterministic() 
             observed_date=datetime(2020, 1, 1).date(),
         ),
     )
-    selected, count, requested, missing = _select_observations(
+    selected, count, requested, missing, missing_companies = _select_observations(
         observations,
         max_unique_tickers=None,
         requested_tickers=("AAPL", "NVDA"),
@@ -166,3 +167,40 @@ def test_market_only_cli_needs_no_sec_identity_and_selection_is_deterministic() 
     assert count == 1
     assert requested == ("AAPL", "NVDA")
     assert missing == ("NVDA",)
+    assert missing_companies == ()
+
+
+def test_market_selection_keeps_all_tickers_for_selected_company() -> None:
+    observations = (
+        IssuerObservation(
+            sec_cik="0000000001",
+            issuer_name="Example Old",
+            ticker="OLD",
+            observed_date=datetime(2015, 1, 1).date(),
+        ),
+        IssuerObservation(
+            sec_cik="0000000001",
+            issuer_name="Example New",
+            ticker="NEW",
+            observed_date=datetime(2020, 1, 1).date(),
+        ),
+        IssuerObservation(
+            sec_cik="0000000002",
+            issuer_name="Other Corp",
+            ticker="OTH",
+            observed_date=datetime(2018, 1, 1).date(),
+        ),
+    )
+    company_id = company_id_from_sec_cik("0000000001")
+    selected, count, requested, missing, missing_companies = _select_observations(
+        observations,
+        max_unique_tickers=None,
+        requested_tickers=None,
+        requested_company_ids=(company_id,),
+    )
+
+    assert selected == observations[:2]
+    assert count == 2
+    assert requested == ()
+    assert missing == ()
+    assert missing_companies == ()

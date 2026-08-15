@@ -5,6 +5,7 @@ _EXPORTS = {
     "BENCHMARK_SPY_COMPANY_ID": (".prepare", "BENCHMARK_SPY_COMPANY_ID"),
     "HistoricalExperimentConfig": (".lightgbm", "HistoricalExperimentConfig"),
     "HistoricalExperimentResult": (".lightgbm", "HistoricalExperimentResult"),
+    "HistoricalUniverseResult": (".historical_universe", "HistoricalUniverseResult"),
     "LightGbmDiagnosticsResult": (".lightgbm_diagnostics", "LightGbmDiagnosticsResult"),
     "PermutationNullResult": (
         ".lightgbm_permutation_null",
@@ -30,7 +31,12 @@ _EXPORTS = {
     "LdaEnrichmentResult": (".enrich", "LdaEnrichmentResult"),
     "SecMarketPopulationConfig": (".prepare", "SecMarketPopulationConfig"),
     "SecMarketPopulationResult": (".prepare", "SecMarketPopulationResult"),
+    "build_historical_universe": (".historical_universe", "build_historical_universe"),
     "enrich_lda_and_qwen": (".enrich", "enrich_lda_and_qwen"),
+    "load_historical_universe_company_ids": (
+        ".historical_universe",
+        "load_historical_universe_company_ids",
+    ),
     "populate_sec_and_market": (".prepare", "populate_sec_and_market"),
     "run_historical_experiment": (".lightgbm", "run_historical_experiment"),
     "run_lightgbm_diagnostics": (".lightgbm_diagnostics", "run_lightgbm_diagnostics"),

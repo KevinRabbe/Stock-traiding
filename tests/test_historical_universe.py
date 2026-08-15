@@ -99,4 +99,59 @@ def test_historical_universe_can_exclude_existing_market_companies(
 
     assert excluded not in selected
     assert result.excluded_existing_companies == 1
+    assert result.excluded_manifest_companies == 0
+    assert result.excluded_total_companies == 1
     assert len(selected) == 2
+
+
+def test_historical_universe_excludes_all_prior_manifest_companies_even_if_unmapped(
+    tmp_path, monkeypatch
+) -> None:
+    snapshot, observations = _snapshot_and_observations()
+    monkeypatch.setattr(
+        module,
+        "load_sec_universe_snapshot",
+        lambda data_root: (snapshot, observations),
+    )
+
+    alpha = company_id_from_sec_cik("0000000001")
+    beta = company_id_from_sec_cik("0000000002")
+    gamma = company_id_from_sec_cik("0000000003")
+
+    market_db = tmp_path / "market.duckdb"
+    with duckdb.connect(str(market_db)) as connection:
+        connection.execute("CREATE TABLE company_security_map(company_id VARCHAR)")
+        connection.execute("INSERT INTO company_security_map VALUES (?)", [alpha])
+
+    prior_manifest = tmp_path / "prior_holdout.json"
+    prior_manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "companies": [
+                    {"company_id": alpha},
+                    {"company_id": beta},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = build_historical_universe(
+        tmp_path,
+        max_companies=1,
+        seed="second-holdout",
+        exclude_market_db=market_db,
+        exclude_universe_manifests=(prior_manifest,),
+    )
+    payload = json.loads(result.output_path.read_text(encoding="utf-8"))
+    selected = {row["company_id"] for row in payload["companies"]}
+
+    assert selected == {gamma}
+    assert alpha not in selected
+    assert beta not in selected
+    assert result.excluded_existing_companies == 1
+    assert result.excluded_manifest_companies == 2
+    assert result.excluded_total_companies == 2
+    assert result.candidate_companies == 1
+    assert payload["exclude_universe_manifests"] == [str(prior_manifest)]

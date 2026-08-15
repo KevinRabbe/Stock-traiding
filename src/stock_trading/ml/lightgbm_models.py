@@ -17,6 +17,14 @@ class OpportunityPrediction:
 
 
 @dataclass(frozen=True, slots=True)
+class ProfitPrediction:
+    expected_stock_return_20d: float
+    expected_downside_20d: float
+    probability_profitable_return: float
+    profit_score: float
+
+
+@dataclass(frozen=True, slots=True)
 class LightGbmTrainingConfig:
     num_boost_round: int = 500
     early_stopping_rounds: int = 50
@@ -98,6 +106,85 @@ class LightGbmModelBundle:
             probability_model=lgb.Booster(model_file=str(root / "probability.txt")),
             downside_penalty=float(metadata["downside_penalty"]),
             positive_alpha_threshold=float(metadata["positive_alpha_threshold"]),
+        )
+
+
+class ProfitLightGbmModelBundle:
+    """LightGBM heads aligned with actual long-only portfolio PnL.
+
+    The original baseline predicts benchmark-relative alpha. That remains useful
+    as a diagnostic, but the backtester realizes stock returns. This bundle
+    therefore predicts absolute 20-day stock return, probability of clearing a
+    configurable net-profit threshold, and downside. Its ranking score is aimed
+    directly at profitable long entries.
+    """
+
+    def __init__(
+        self,
+        *,
+        feature_schema: FeatureSchema,
+        return_model: lgb.Booster,
+        downside_model: lgb.Booster,
+        probability_model: lgb.Booster,
+        downside_penalty: float,
+        profitable_return_threshold: float,
+    ) -> None:
+        self.feature_schema = feature_schema
+        self.return_model = return_model
+        self.downside_model = downside_model
+        self.probability_model = probability_model
+        self.downside_penalty = downside_penalty
+        self.profitable_return_threshold = profitable_return_threshold
+
+    def predict(self, features: dict[str, float | None]) -> ProfitPrediction:
+        matrix = np.asarray([self.feature_schema.vector(features)], dtype=np.float32)
+        expected_return = float(self.return_model.predict(matrix)[0])
+        downside = max(0.0, float(self.downside_model.predict(matrix)[0]))
+        probability = float(self.probability_model.predict(matrix)[0])
+        probability = min(1.0, max(0.0, probability))
+        score = expected_return * probability - self.downside_penalty * downside
+        return ProfitPrediction(
+            expected_stock_return_20d=expected_return,
+            expected_downside_20d=downside,
+            probability_profitable_return=probability,
+            profit_score=score,
+        )
+
+    def feature_importance(self, *, importance_type: str = "gain") -> dict[str, float]:
+        values = self.return_model.feature_importance(importance_type=importance_type)
+        return {
+            name: float(value)
+            for name, value in zip(self.feature_schema.names, values, strict=True)
+        }
+
+    def save(self, directory: str | Path) -> Path:
+        root = Path(directory)
+        root.mkdir(parents=True, exist_ok=True)
+        self.return_model.save_model(str(root / "stock_return.txt"))
+        self.downside_model.save_model(str(root / "downside.txt"))
+        self.probability_model.save_model(str(root / "profit_probability.txt"))
+        metadata = {
+            "feature_names": list(self.feature_schema.names),
+            "downside_penalty": self.downside_penalty,
+            "profitable_return_threshold": self.profitable_return_threshold,
+        }
+        (root / "metadata.json").write_text(
+            json.dumps(metadata, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        return root
+
+    @classmethod
+    def load(cls, directory: str | Path) -> "ProfitLightGbmModelBundle":
+        root = Path(directory)
+        metadata = json.loads((root / "metadata.json").read_text(encoding="utf-8"))
+        return cls(
+            feature_schema=FeatureSchema(tuple(metadata["feature_names"])),
+            return_model=lgb.Booster(model_file=str(root / "stock_return.txt")),
+            downside_model=lgb.Booster(model_file=str(root / "downside.txt")),
+            probability_model=lgb.Booster(model_file=str(root / "profit_probability.txt")),
+            downside_penalty=float(metadata["downside_penalty"]),
+            profitable_return_threshold=float(metadata["profitable_return_threshold"]),
         )
 
 
@@ -235,6 +322,95 @@ class LightGbmTrainer:
                 ),
                 lgb.log_evaluation(period=0),
             ],
+        )
+
+
+class ProfitLightGbmTrainer:
+    def __init__(self, config: LightGbmTrainingConfig | None = None) -> None:
+        self.config = config or LightGbmTrainingConfig()
+
+    def train(
+        self,
+        train_rows: tuple[TrainingRow, ...] | list[TrainingRow],
+        validation_rows: tuple[TrainingRow, ...] | list[TrainingRow],
+        *,
+        profitable_return_threshold: float = 0.002,
+    ) -> ProfitLightGbmModelBundle:
+        train_rows = tuple(train_rows)
+        validation_rows = tuple(validation_rows)
+        if not train_rows:
+            raise ValueError("train_rows must not be empty")
+        if not validation_rows:
+            raise ValueError("validation_rows must not be empty")
+
+        schema = FeatureSchema.from_rows(train_rows)
+        train_x = schema.matrix(train_rows)
+        validation_x = schema.matrix(validation_rows)
+        train_weight = (
+            _company_balanced_weights(train_rows)
+            if self.config.balance_companies
+            else None
+        )
+        validation_weight = (
+            _company_balanced_weights(validation_rows)
+            if self.config.balance_companies
+            else None
+        )
+        base_trainer = LightGbmTrainer(self.config)
+
+        return_model = base_trainer._train_one(
+            train_x,
+            np.asarray([row.stock_return_20d for row in train_rows], dtype=np.float64),
+            validation_x,
+            np.asarray([row.stock_return_20d for row in validation_rows], dtype=np.float64),
+            train_weight=train_weight,
+            validation_weight=validation_weight,
+            feature_names=schema.names,
+            objective="regression_l2",
+            metric="l2",
+        )
+        downside = base_trainer._train_one(
+            train_x,
+            np.asarray([row.downside_20d for row in train_rows], dtype=np.float64),
+            validation_x,
+            np.asarray([row.downside_20d for row in validation_rows], dtype=np.float64),
+            train_weight=train_weight,
+            validation_weight=validation_weight,
+            feature_names=schema.names,
+            objective="regression_l1",
+            metric="l1",
+        )
+        probability = base_trainer._train_one(
+            train_x,
+            np.asarray(
+                [
+                    row.stock_return_20d >= profitable_return_threshold
+                    for row in train_rows
+                ],
+                dtype=np.float64,
+            ),
+            validation_x,
+            np.asarray(
+                [
+                    row.stock_return_20d >= profitable_return_threshold
+                    for row in validation_rows
+                ],
+                dtype=np.float64,
+            ),
+            train_weight=train_weight,
+            validation_weight=validation_weight,
+            feature_names=schema.names,
+            objective="binary",
+            metric="binary_logloss",
+        )
+
+        return ProfitLightGbmModelBundle(
+            feature_schema=schema,
+            return_model=return_model,
+            downside_model=downside,
+            probability_model=probability,
+            downside_penalty=self.config.downside_penalty,
+            profitable_return_threshold=profitable_return_threshold,
         )
 
 

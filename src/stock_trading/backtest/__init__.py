@@ -2,6 +2,7 @@ from .portfolio import (
     BacktestConfig,
     BacktestResult,
     FixedAllocationBacktester,
+    FixedAllocationTrancheBacktester,
     ScoredCandidate,
     TradeRecord,
 )
@@ -17,6 +18,7 @@ __all__ = [
     "BacktestConfig",
     "BacktestResult",
     "FixedAllocationBacktester",
+    "FixedAllocationTrancheBacktester",
     "ScoreBucketResult",
     "ScoredCandidate",
     "TradeRecord",

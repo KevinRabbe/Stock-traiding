@@ -18,6 +18,10 @@ _EXPORTS = {
         ".lightgbm_profit",
         "ProfitTargetExperimentResult",
     ),
+    "ProfitTrancheExperimentResult": (
+        ".lightgbm_profit_tranches",
+        "ProfitTrancheExperimentResult",
+    ),
     "ValidationRankBacktestResult": (
         ".lightgbm_validation_rank",
         "ValidationRankBacktestResult",
@@ -41,6 +45,10 @@ _EXPORTS = {
     "run_profit_target_experiment": (
         ".lightgbm_profit",
         "run_profit_target_experiment",
+    ),
+    "run_profit_tranche_experiment": (
+        ".lightgbm_profit_tranches",
+        "run_profit_tranche_experiment",
     ),
     "run_validation_rank_backtest": (
         ".lightgbm_validation_rank",

@@ -6,6 +6,38 @@ import httpx
 from stock_trading.core import RawRecord, Source, content_sha256
 
 
+_ACCOUNT_WIDE_HTTP_STATUSES = frozenset({401, 403, 429})
+
+
+class TiingoAccountError(RuntimeError):
+    """Account-wide Tiingo failure that should abort resumable backfills immediately."""
+
+    def __init__(
+        self,
+        status_code: int,
+        url: str,
+        *,
+        retry_after: str | None = None,
+    ) -> None:
+        self.status_code = status_code
+        self.url = url
+        self.retry_after = retry_after
+
+        if status_code == 429:
+            message = (
+                "Tiingo request quota reached (HTTP 429). Successful responses are already "
+                "cached; rerun after the Tiingo request quota resets."
+            )
+            if retry_after:
+                message += f" Retry-After: {retry_after}."
+        else:
+            message = (
+                f"Tiingo authentication or account access failed (HTTP {status_code}). "
+                "Check the local API token and Tiingo account access before retrying."
+            )
+        super().__init__(message)
+
+
 class TiingoClient:
     BASE_URL = "https://api.tiingo.com"
 
@@ -72,6 +104,12 @@ class TiingoClient:
 
     def _get(self, path: str, *, params: dict | None = None) -> httpx.Response:
         response = self._client.get(f"{self.BASE_URL}{path}", params=params)
+        if response.status_code in _ACCOUNT_WIDE_HTTP_STATUSES:
+            raise TiingoAccountError(
+                response.status_code,
+                str(response.request.url),
+                retry_after=response.headers.get("Retry-After"),
+            )
         response.raise_for_status()
         return response
 

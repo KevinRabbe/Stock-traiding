@@ -116,7 +116,7 @@ class ProfitLightGbmModelBundle:
     as a diagnostic, but the backtester realizes stock returns. This bundle
     therefore predicts absolute 20-day stock return, probability of clearing a
     configurable net-profit threshold, and downside. Its ranking score is aimed
-    directly at profitable long entries.
+    directly at profitable long entries after transaction costs.
     """
 
     def __init__(
@@ -142,7 +142,8 @@ class ProfitLightGbmModelBundle:
         downside = max(0.0, float(self.downside_model.predict(matrix)[0]))
         probability = float(self.probability_model.predict(matrix)[0])
         probability = min(1.0, max(0.0, probability))
-        score = expected_return * probability - self.downside_penalty * downside
+        expected_net_return = expected_return - self.profitable_return_threshold
+        score = expected_net_return * probability - self.downside_penalty * downside
         return ProfitPrediction(
             expected_stock_return_20d=expected_return,
             expected_downside_20d=downside,

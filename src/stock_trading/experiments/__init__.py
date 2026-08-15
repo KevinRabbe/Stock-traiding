@@ -10,6 +10,10 @@ _EXPORTS = {
         ".lightgbm_permutation_null",
         "PermutationNullResult",
     ),
+    "ProfitTargetExperimentResult": (
+        ".lightgbm_profit",
+        "ProfitTargetExperimentResult",
+    ),
     "ValidationRankBacktestResult": (
         ".lightgbm_validation_rank",
         "ValidationRankBacktestResult",
@@ -25,6 +29,10 @@ _EXPORTS = {
     "run_permutation_null_test": (
         ".lightgbm_permutation_null",
         "run_permutation_null_test",
+    ),
+    "run_profit_target_experiment": (
+        ".lightgbm_profit",
+        "run_profit_target_experiment",
     ),
     "run_validation_rank_backtest": (
         ".lightgbm_validation_rank",

@@ -27,6 +27,8 @@ from stock_trading.ml.walk_forward import (
 )
 from stock_trading.storage import DuckDbEventStore
 
+from .historical_universe import load_historical_universe_company_ids
+
 
 _MODEL_EVENT_TYPES = (
     EventType.INSIDER_TRANSACTION,
@@ -51,6 +53,7 @@ class HistoricalExperimentConfig:
     top_feature_count: int = 30
     market_read_cache_series: int = 8
     hash_input_databases: bool = False
+    company_universe_manifest: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,15 +86,30 @@ def run_historical_experiment(
     if config.market_read_cache_series > 0:
         market_store.enable_read_cache(max_series=config.market_read_cache_series)
     source_event_count = event_store.count()
-    mapped_company_ids = _mapped_company_ids(market_store)
-    if not mapped_company_ids:
+    all_mapped_company_ids = _mapped_company_ids(market_store)
+    if not all_mapped_company_ids:
         raise ValueError("market store has no verified company-to-security mappings")
 
+    requested_company_ids: tuple[str, ...] | None = None
+    if config.company_universe_manifest is not None:
+        requested_company_ids = load_historical_universe_company_ids(
+            config.company_universe_manifest
+        )
+        mapped_set = set(all_mapped_company_ids)
+        mapped_company_ids = tuple(
+            company_id for company_id in requested_company_ids if company_id in mapped_set
+        )
+        if not mapped_company_ids:
+            raise ValueError(
+                "none of the companies in company_universe_manifest have verified market mappings"
+            )
+    else:
+        mapped_company_ids = all_mapped_company_ids
+
     # The normalized event database can contain millions of companies/events while
-    # a development market universe may contain only tens or hundreds of verified
-    # securities. Load only event families used by the model for companies that
-    # have an explicit market mapping. This is both faster and safer than probing
-    # unresolved companies one event at a time.
+    # a development or holdout market universe may contain only tens or hundreds
+    # of verified securities. Load only event families used by the model for the
+    # explicitly selected companies.
     all_events = event_store.all_events(
         company_ids=mapped_company_ids,
         event_types=_MODEL_EVENT_TYPES,
@@ -197,8 +215,14 @@ def run_historical_experiment(
     }
     events_stat = config.events_db.stat()
     market_stat = config.market_db.stat()
+    requested_count = len(requested_company_ids) if requested_company_ids is not None else None
+    unmapped_requested = (
+        len(set(requested_company_ids) - set(mapped_company_ids))
+        if requested_company_ids is not None
+        else None
+    )
     report = {
-        "schema_version": "historical-lightgbm-v3-opportunity",
+        "schema_version": "historical-lightgbm-v4-universe-scope",
         "inputs": {
             "events_db": str(config.events_db),
             "events_db_size_bytes": events_stat.st_size,
@@ -214,10 +238,18 @@ def run_historical_experiment(
             ),
             "strong_input_hashes": config.hash_input_databases,
             "benchmark_security_id": config.benchmark_company_id,
+            "company_universe_manifest": (
+                str(config.company_universe_manifest)
+                if config.company_universe_manifest is not None
+                else None
+            ),
+            "requested_company_count": requested_count,
+            "unmapped_requested_company_count": unmapped_requested,
         },
         "dataset": {
             "row_unit": "company_execution_session_opportunity",
             "source_event_count": source_event_count,
+            "market_store_company_count": len(all_mapped_company_ids),
             "mapped_company_count": len(mapped_company_ids),
             "selected_event_count": len(all_events),
             "raw_trigger_event_count": len(trigger_events),
@@ -315,6 +347,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-train-rows", type=int, default=100)
     parser.add_argument("--min-validation-rows", type=int, default=20)
     parser.add_argument(
+        "--company-universe-manifest",
+        type=Path,
+        help=(
+            "Restrict model rows to companies in a historical-universe manifest, even "
+            "when the market DuckDB contains additional development companies."
+        ),
+    )
+    parser.add_argument(
         "--market-read-cache-series",
         type=int,
         default=8,
@@ -345,6 +385,7 @@ def main() -> None:
             min_validation_rows=args.min_validation_rows,
             market_read_cache_series=args.market_read_cache_series,
             hash_input_databases=args.strong_input_hashes,
+            company_universe_manifest=args.company_universe_manifest,
         ),
         backtest_config=BacktestConfig(
             starting_capital=args.starting_capital,

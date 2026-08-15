@@ -128,12 +128,7 @@ def test_historical_experiment_runs_from_stores_to_report(tmp_path) -> None:
     for year in (2022, 2023, 2024):
         for index, (company_id, _security_id, _ticker, _return, value) in enumerate(companies):
             events.append(_event(company_id, year, index, value))
-    # Two same-company source rows public before the same next market session must
-    # become one opportunity row, not two independent training samples.
     events.append(_event("cmp_fast", 2024, 100, "2500"))
-    # This source event deliberately has no verified company->security mapping.
-    # The real experiment must not load/probe it when the event store is much
-    # larger than the currently prepared market universe.
     events.append(_event("cmp_unmapped", 2024, 99, "9999"))
     event_store.put_many(events)
 
@@ -191,7 +186,7 @@ def test_historical_experiment_runs_from_stores_to_report(tmp_path) -> None:
     assert fast_2024["features"]["trigger.insider_event_count"] == 2.0
 
     report_payload = json.loads((output / "report.json").read_text(encoding="utf-8"))
-    assert report_payload["schema_version"] == "historical-lightgbm-v3-opportunity"
+    assert report_payload["schema_version"] == "historical-lightgbm-v4-universe-scope"
     assert report_payload["dataset"]["row_unit"] == "company_execution_session_opportunity"
     assert report_payload["dataset"]["source_event_count"] == 14
     assert report_payload["dataset"]["mapped_company_count"] == 4

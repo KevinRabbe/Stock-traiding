@@ -70,12 +70,19 @@ class PortfolioRiskPolicy(Protocol):
 
 
 class PositionManager(Protocol):
-    """Manage existing positions independently from new-entry strategies."""
+    """Review existing positions using the newest strategy information.
+
+    Position management is deliberately allowed to react to repeat/new signals,
+    but this boundary may only reduce/exit existing positions. New or increased
+    exposure must continue through opportunity risk + portfolio allocation.
+    """
 
     def orders(
         self,
         portfolio: PortfolioSnapshot,
         as_of: datetime,
+        candidates: tuple[FeatureSnapshot, ...],
+        opportunities: tuple[Opportunity, ...],
     ) -> tuple[OrderIntent, ...]: ...
 
 

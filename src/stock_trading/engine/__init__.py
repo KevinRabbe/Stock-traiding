@@ -10,6 +10,7 @@ from .contracts import (
     PortfolioSnapshot,
     StrategyStage,
 )
+from .persistence import FileStrategyMetadataStore, JsonlEngineAuditObserver
 from .policies import (
     BasicOpportunityRiskPolicy,
     FixedAllocationPortfolioPolicy,
@@ -19,8 +20,10 @@ from .policies import (
 )
 from .registry import (
     ProfitabilityGate,
+    StrategyMetadataStore,
     StrategyRecord,
     StrategyRegistry,
+    StrategyRegistrySnapshot,
     StrategyScorecard,
 )
 from .runtime import TradingEngine
@@ -31,8 +34,10 @@ __all__ = [
     "EngineCycleResult",
     "ExecutionReport",
     "FeatureSnapshot",
+    "FileStrategyMetadataStore",
     "FixedAllocationPortfolioPolicy",
     "HoldPositions",
+    "JsonlEngineAuditObserver",
     "Opportunity",
     "OrderIntent",
     "OrderSide",
@@ -41,8 +46,10 @@ __all__ = [
     "PortfolioPosition",
     "PortfolioSnapshot",
     "ProfitabilityGate",
+    "StrategyMetadataStore",
     "StrategyRecord",
     "StrategyRegistry",
+    "StrategyRegistrySnapshot",
     "StrategyScorecard",
     "StrategyStage",
     "TradingEngine",

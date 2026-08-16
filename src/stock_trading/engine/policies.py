@@ -4,7 +4,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterable
 
-from .contracts import AllocationIntent, Opportunity, OrderIntent, PortfolioSnapshot
+from .contracts import (
+    AllocationIntent,
+    FeatureSnapshot,
+    Opportunity,
+    OrderIntent,
+    PortfolioSnapshot,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,8 +122,10 @@ class HoldPositions:
         self,
         portfolio: PortfolioSnapshot,
         as_of: datetime,
+        candidates: tuple[FeatureSnapshot, ...],
+        opportunities: tuple[Opportunity, ...],
     ) -> tuple[OrderIntent, ...]:
-        del portfolio, as_of
+        del portfolio, as_of, candidates, opportunities
         return ()
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 from .contracts import StrategyStage
 from .protocols import OpportunityStrategy
@@ -35,6 +36,22 @@ class StrategyRecord:
     selection_score: float | None = None
     notes: str = ""
 
+    def __post_init__(self) -> None:
+        if not self.strategy_id.strip():
+            raise ValueError("strategy_id must not be empty")
+
+
+@dataclass(frozen=True, slots=True)
+class StrategyRegistrySnapshot:
+    champion_id: str | None
+    records: tuple[StrategyRecord, ...]
+
+
+class StrategyMetadataStore(Protocol):
+    def load(self) -> StrategyRegistrySnapshot | None: ...
+
+    def save(self, snapshot: StrategyRegistrySnapshot) -> None: ...
+
 
 @dataclass(frozen=True, slots=True)
 class ProfitabilityGate:
@@ -60,41 +77,82 @@ class ProfitabilityGate:
 
 
 class StrategyRegistry:
-    """In-process champion/challenger registry for strategy plugins.
+    """Champion/challenger registry with optional durable deployment metadata.
 
-    The registry can recommend an eligible challenger from an externally computed
-    ``selection_score``, but promotion is always explicit through ``set_champion``.
-    Backtest results therefore cannot silently deploy a live strategy.
+    Durable metadata is kept even when a strategy plugin is not loaded in the
+    current process. The champion ID may therefore be known after restart while
+    ``active()`` still refuses to run until that exact plugin is explicitly loaded.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, metadata_store: StrategyMetadataStore | None = None) -> None:
         self._strategies: dict[str, OpportunityStrategy] = {}
-        self._records: dict[str, StrategyRecord] = {}
-        self._champion_id: str | None = None
+        self._metadata_store = metadata_store
+        persisted = metadata_store.load() if metadata_store is not None else None
+        self._records: dict[str, StrategyRecord] = (
+            {record.strategy_id: record for record in persisted.records}
+            if persisted is not None
+            else {}
+        )
+        self._champion_id = persisted.champion_id if persisted is not None else None
 
-    def register(self, strategy: OpportunityStrategy, record: StrategyRecord) -> None:
-        if strategy.strategy_id != record.strategy_id:
+    def register(
+        self,
+        strategy: OpportunityStrategy,
+        record: StrategyRecord | None = None,
+    ) -> None:
+        persisted = self._records.get(strategy.strategy_id)
+        resolved = persisted or record
+        if resolved is None:
+            raise ValueError(
+                f"no metadata supplied or persisted for strategy {strategy.strategy_id}"
+            )
+        if strategy.strategy_id != resolved.strategy_id:
             raise ValueError("strategy_id mismatch between plugin and record")
-        self._strategies[record.strategy_id] = strategy
-        self._records[record.strategy_id] = record
+        if (
+            self._champion_id == resolved.strategy_id
+            and resolved.stage is StrategyStage.RETIRED
+        ):
+            raise ValueError("persisted champion strategy is retired")
+        self._strategies[resolved.strategy_id] = strategy
+        self._records[resolved.strategy_id] = resolved
+        if persisted is None:
+            self._persist()
 
     def update_record(self, record: StrategyRecord) -> None:
-        if record.strategy_id not in self._strategies:
+        if record.strategy_id not in self._records:
             raise KeyError(f"unknown strategy {record.strategy_id}")
+        if (
+            self._champion_id == record.strategy_id
+            and record.stage is StrategyStage.RETIRED
+        ):
+            raise ValueError("champion strategy cannot be retired before replacement")
         self._records[record.strategy_id] = record
+        self._persist()
 
     def set_champion(self, strategy_id: str) -> None:
         record = self._records.get(strategy_id)
         if record is None:
             raise KeyError(f"unknown strategy {strategy_id}")
+        if strategy_id not in self._strategies:
+            raise RuntimeError("champion strategy plugin must be loaded before promotion")
         if record.stage is StrategyStage.RETIRED:
             raise ValueError("retired strategy cannot be champion")
         self._champion_id = strategy_id
+        self._persist()
+
+    @property
+    def champion_id(self) -> str | None:
+        return self._champion_id
 
     def active(self) -> OpportunityStrategy:
         if self._champion_id is None:
             raise RuntimeError("no champion strategy configured")
-        return self._strategies[self._champion_id]
+        try:
+            return self._strategies[self._champion_id]
+        except KeyError as exc:
+            raise RuntimeError(
+                f"champion strategy plugin {self._champion_id} is not loaded"
+            ) from exc
 
     def record(self, strategy_id: str) -> StrategyRecord:
         try:
@@ -125,7 +183,19 @@ class StrategyRegistry:
             eligible,
             key=lambda record: (
                 float(record.selection_score),
-                float(record.scorecard.compounded_return) if record.scorecard else float("-inf"),
+                float(record.scorecard.compounded_return)
+                if record.scorecard
+                else float("-inf"),
                 record.strategy_id,
             ),
         )
+
+    def snapshot(self) -> StrategyRegistrySnapshot:
+        return StrategyRegistrySnapshot(
+            champion_id=self._champion_id,
+            records=self.records(),
+        )
+
+    def _persist(self) -> None:
+        if self._metadata_store is not None:
+            self._metadata_store.save(self.snapshot())

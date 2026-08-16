@@ -34,10 +34,11 @@ class FixedAllocationPortfolioPolicy:
         remaining_exposure = max(0.0, self.max_gross_exposure_pct - portfolio.gross_exposure_pct)
         results: list[AllocationIntent] = []
 
+        # Match the proven legacy portfolio ordering exactly: highest score first,
+        # then stable candidate/event identity ascending for deterministic ties.
         for opportunity in sorted(
             opportunities,
-            key=lambda item: (item.score, item.expected_return, item.candidate_id),
-            reverse=True,
+            key=lambda item: (-item.score, item.candidate_id),
         ):
             if len(results) >= available_slots:
                 break

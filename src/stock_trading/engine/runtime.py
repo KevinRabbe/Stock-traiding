@@ -5,6 +5,7 @@ from hashlib import sha256
 from .contracts import (
     AllocationIntent,
     EngineCycleResult,
+    ExecutionStatus,
     FeatureSnapshot,
     Opportunity,
     OrderIntent,
@@ -51,6 +52,13 @@ class TradingEngine:
         self._observer = observer
 
     def run_cycle(self, as_of) -> EngineCycleResult:
+        # Pending orders from prior decisions settle before the portfolio snapshot
+        # used for this cycle. Legacy/test brokers without settle remain supported
+        # while adapters migrate to the full execution protocol.
+        settle = getattr(self._broker, "settle", None)
+        settlements = tuple(settle(as_of)) if settle is not None else ()
+        _validate_settlements(settlements)
+
         portfolio = self._state_provider.snapshot(as_of)
         if portfolio.as_of != as_of:
             raise ValueError("portfolio snapshot as_of does not match engine cycle")
@@ -96,6 +104,7 @@ class TradingEngine:
             position_orders=position_orders,
             entry_orders=entry_orders,
             executions=executions,
+            settlements=settlements,
         )
         if self._observer is not None:
             self._observer.record(result)
@@ -230,6 +239,7 @@ def _entry_order(allocation: AllocationIntent, as_of) -> OrderIntent:
         allocation_pct=allocation.allocation_pct,
         created_at=as_of,
         horizon_sessions=opportunity.horizon_sessions,
+        execute_on=opportunity.execution_date,
         reason=allocation.reason,
         metadata={
             "score": opportunity.score,
@@ -258,3 +268,11 @@ def _validate_execution_reports(
         raise ValueError("broker returned duplicate execution report")
     if set(returned) != expected:
         raise ValueError("broker must return exactly one execution report per order")
+
+
+def _validate_settlements(settlements) -> None:
+    ids = [report.order_id for report in settlements]
+    if len(ids) != len(set(ids)):
+        raise ValueError("broker returned duplicate settlement report")
+    if any(report.status is ExecutionStatus.QUEUED for report in settlements):
+        raise ValueError("settle() cannot return still-queued orders")

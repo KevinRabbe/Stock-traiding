@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 import numpy as np
 import pytest
@@ -8,11 +8,17 @@ from stock_trading.ml.score_calibration import rolling_score_percentiles
 
 
 def _row(event_id: str, execution_day: int) -> TrainingRow:
+    execution_date = date(2024, 1, execution_day)
+    decision_date = execution_date - timedelta(days=1)
     return TrainingRow(
         event_id=event_id,
         company_id=event_id,
-        decision_time=datetime(2024, 1, execution_day - 1, 12, tzinfo=timezone.utc),
-        execution_date=date(2024, 1, execution_day),
+        decision_time=datetime.combine(
+            decision_date,
+            time(hour=12),
+            tzinfo=timezone.utc,
+        ),
+        execution_date=execution_date,
         exit_date_20d=date(2024, 2, min(execution_day, 28)),
         features={"x": 1.0},
         stock_return_20d=0.0,

@@ -43,11 +43,7 @@ def test_same_day_scores_do_not_calibrate_each_other() -> None:
 
 
 def test_calibration_discards_scores_outside_window() -> None:
-    old_validation = TrainingRow(
-        **{
-            **_row("old", 1).__dict__,
-        }
-    ) if False else _row("old", 1)
+    old_validation = _row("old", 1)
     recent_validation = _row("recent", 20)
     test = (_row("test", 21),)
 

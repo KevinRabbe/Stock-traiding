@@ -91,6 +91,10 @@ class PortfolioStateProvider(Protocol):
 
 
 class ExecutionBroker(Protocol):
+    """Queue/execute new orders and settle previously queued orders."""
+
+    def settle(self, as_of: datetime) -> tuple[ExecutionReport, ...]: ...
+
     def execute(self, orders: tuple[OrderIntent, ...]) -> tuple[ExecutionReport, ...]: ...
 
 

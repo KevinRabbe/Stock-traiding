@@ -22,6 +22,13 @@ class OrderSide(StrEnum):
     SELL = "sell"
 
 
+class ExecutionStatus(StrEnum):
+    QUEUED = "queued"
+    FILLED = "filled"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
+
+
 @dataclass(frozen=True, slots=True)
 class FeatureSnapshot:
     """One point-in-time candidate presented to a strategy."""
@@ -114,6 +121,7 @@ class OrderIntent:
     candidate_id: str | None = None
     event_id: str | None = None
     horizon_sessions: int | None = None
+    execute_on: date | None = None
     reason: str = ""
     metadata: Mapping[str, FeatureValue] = field(default_factory=dict)
 
@@ -122,6 +130,8 @@ class OrderIntent:
             raise ValueError("order allocation_pct must be > 0")
         if self.horizon_sessions is not None and self.horizon_sessions <= 0:
             raise ValueError("horizon_sessions must be > 0 when provided")
+        if self.execute_on is not None and self.execute_on < self.created_at.date():
+            raise ValueError("execute_on cannot precede order creation date")
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +141,15 @@ class ExecutionReport:
     executed_at: datetime
     message: str = ""
     fill_price: float | None = None
+    status: ExecutionStatus = ExecutionStatus.FILLED
+
+    def __post_init__(self) -> None:
+        if self.status in {ExecutionStatus.QUEUED, ExecutionStatus.FILLED} and not self.accepted:
+            raise ValueError("queued/filled execution reports must be accepted")
+        if self.status in {ExecutionStatus.REJECTED, ExecutionStatus.CANCELLED} and self.accepted:
+            raise ValueError("rejected/cancelled execution reports cannot be accepted")
+        if self.fill_price is not None and self.fill_price <= 0:
+            raise ValueError("fill_price must be > 0 when provided")
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,3 +163,4 @@ class EngineCycleResult:
     position_orders: tuple[OrderIntent, ...]
     entry_orders: tuple[OrderIntent, ...]
     executions: tuple[ExecutionReport, ...]
+    settlements: tuple[ExecutionReport, ...] = ()

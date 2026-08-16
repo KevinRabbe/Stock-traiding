@@ -9,6 +9,7 @@ from .contracts import (
     Opportunity,
     OrderIntent,
     OrderSide,
+    PortfolioSnapshot,
 )
 from .protocols import (
     CandidateSource,
@@ -54,13 +55,22 @@ class TradingEngine:
         if portfolio.as_of != as_of:
             raise ValueError("portfolio snapshot as_of does not match engine cycle")
 
-        position_orders = self._position_manager.orders(portfolio, as_of)
         candidates = self._candidate_source.candidates(as_of)
         candidate_by_id = _unique_candidates(candidates)
 
         strategy = self._strategy_provider.active()
         opportunities = strategy.evaluate(candidates, portfolio)
         _validate_opportunities(strategy.strategy_id, opportunities, candidate_by_id)
+
+        # Existing-position logic can react to the latest strategy output, but it
+        # is explicitly prevented from creating or increasing exposure.
+        position_orders = self._position_manager.orders(
+            portfolio,
+            as_of,
+            candidates,
+            opportunities,
+        )
+        _validate_position_orders(position_orders, portfolio)
 
         eligible = self._opportunity_risk.filter(opportunities, portfolio)
         _validate_subset(opportunities, eligible, "opportunity risk")
@@ -129,6 +139,29 @@ def _validate_opportunities(
             raise ValueError(
                 f"strategy changed candidate identity for {opportunity.candidate_id}"
             )
+
+
+def _validate_position_orders(
+    orders: tuple[OrderIntent, ...],
+    portfolio: PortfolioSnapshot,
+) -> None:
+    positions = {
+        (position.company_id, position.security_id): position
+        for position in portfolio.positions
+    }
+    seen_positions: set[tuple[str, str]] = set()
+    for order in orders:
+        key = (order.company_id, order.security_id)
+        position = positions.get(key)
+        if position is None:
+            raise ValueError("position manager referenced a non-open position")
+        if order.side is not OrderSide.SELL:
+            raise ValueError("position manager may only reduce/exit existing positions")
+        if order.strategy_id != position.strategy_id:
+            raise ValueError("position manager changed position strategy ownership")
+        if key in seen_positions:
+            raise ValueError("position manager emitted multiple orders for one position")
+        seen_positions.add(key)
 
 
 def _validate_subset(

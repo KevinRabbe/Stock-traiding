@@ -1,11 +1,21 @@
 import json
+from dataclasses import dataclass
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, DecimalException
+
+from pydantic import ValidationError
 
 from stock_trading.core import RawRecord, Source
 
 from .models import MarketBar, TiingoMetadata
 from .tiingo import normalize_tiingo_ticker
+
+
+@dataclass(frozen=True, slots=True)
+class TiingoPriceRowIssue:
+    row_index: int
+    date: str | None
+    reason: str
 
 
 class TiingoNormalizer:
@@ -35,12 +45,18 @@ class TiingoNormalizer:
         security_id: str | None = None,
         ticker: str,
         company_id: str | None = None,
+        invalid_rows: list[TiingoPriceRowIssue] | None = None,
     ) -> tuple[MarketBar, ...]:
         """Normalize a Tiingo series onto security identity.
 
         ``company_id`` is accepted temporarily as a compatibility alias for old
         benchmark/setup call sites. It is interpreted only as the security ID;
         no company attribution is written into ``MarketBar``.
+
+        Normalization is strict by default. Backfill callers may pass
+        ``invalid_rows`` to quarantine malformed provider rows while preserving
+        the valid rows from the same response. The rejected rows are never
+        repaired or inserted into the market store.
         """
 
         if security_id is not None and company_id is not None and security_id != company_id:
@@ -56,26 +72,39 @@ class TiingoNormalizer:
             raise ValueError("Tiingo prices response must be a JSON list")
 
         bars: list[MarketBar] = []
-        for row in payload:
-            bars.append(
-                MarketBar(
-                    security_id=resolved_security_id,
-                    ticker=normalized_ticker,
-                    date=date.fromisoformat(str(row["date"])[:10]),
-                    open=self._decimal(row["open"]),
-                    high=self._decimal(row["high"]),
-                    low=self._decimal(row["low"]),
-                    close=self._decimal(row["close"]),
-                    volume=self._decimal(row["volume"]),
-                    adj_open=self._decimal(row["adjOpen"]),
-                    adj_high=self._decimal(row["adjHigh"]),
-                    adj_low=self._decimal(row["adjLow"]),
-                    adj_close=self._decimal(row["adjClose"]),
-                    adj_volume=self._decimal(row["adjVolume"]),
-                    dividend_cash=self._decimal(row.get("divCash", 0)),
-                    split_factor=self._decimal(row.get("splitFactor", 1)),
+        for row_index, row in enumerate(payload):
+            try:
+                if not isinstance(row, dict):
+                    raise TypeError("Tiingo price row must be a JSON object")
+                bars.append(
+                    MarketBar(
+                        security_id=resolved_security_id,
+                        ticker=normalized_ticker,
+                        date=date.fromisoformat(str(row["date"])[:10]),
+                        open=self._decimal(row["open"]),
+                        high=self._decimal(row["high"]),
+                        low=self._decimal(row["low"]),
+                        close=self._decimal(row["close"]),
+                        volume=self._decimal(row["volume"]),
+                        adj_open=self._decimal(row["adjOpen"]),
+                        adj_high=self._decimal(row["adjHigh"]),
+                        adj_low=self._decimal(row["adjLow"]),
+                        adj_close=self._decimal(row["adjClose"]),
+                        adj_volume=self._decimal(row["adjVolume"]),
+                        dividend_cash=self._decimal(row.get("divCash", 0)),
+                        split_factor=self._decimal(row.get("splitFactor", 1)),
+                    )
                 )
-            )
+            except (ValidationError, KeyError, TypeError, ValueError, DecimalException) as exc:
+                if invalid_rows is None:
+                    raise
+                invalid_rows.append(
+                    TiingoPriceRowIssue(
+                        row_index=row_index,
+                        date=self._row_date_hint(row),
+                        reason=self._row_failure_reason(exc),
+                    )
+                )
         return tuple(bars)
 
     @staticmethod
@@ -94,3 +123,23 @@ class TiingoNormalizer:
     @staticmethod
     def _decimal(value) -> Decimal:
         return Decimal(str(value))
+
+    @staticmethod
+    def _row_date_hint(row) -> str | None:
+        if not isinstance(row, dict):
+            return None
+        value = row.get("date")
+        if value is None:
+            return None
+        return str(value)[:10]
+
+    @staticmethod
+    def _row_failure_reason(exc: Exception) -> str:
+        if isinstance(exc, ValidationError):
+            errors = exc.errors()
+            if errors:
+                message = errors[0].get("msg")
+                if message:
+                    return str(message)
+        message = str(exc).strip()
+        return message or type(exc).__name__

@@ -1,53 +1,52 @@
 # Trading engine architecture
 
-This document defines the target architecture for the project after the V1-V7 research phase. The goal is to stop coupling the trading system to one LightGBM experiment and make strategy choice replaceable.
+The project is no longer organized around extending `lightgbm_profit_vN` indefinitely. Strategy logic is replaceable; capital, risk, positions, execution, lifecycle and monitoring belong to a shared engine.
 
 ## Core rule
 
-A strategy may **score opportunities**, but it never owns capital, positions, broker access, or live deployment.
-
-The shared engine owns the rest:
+A strategy may **score opportunities**, but it never owns capital, positions, broker access, or deployment.
 
 ```text
 point-in-time data
     -> candidate snapshots
-    -> active strategy
+    -> strategy plugin
     -> opportunity-level risk
     -> portfolio allocation
     -> portfolio-level risk
-    -> existing-position management
-    -> execution broker
-    -> state + monitoring
+    -> position management
+    -> broker-neutral order intents
+    -> queued/filled execution
+    -> persistent portfolio state
+    -> audit + monitoring
 ```
 
-This lets the project keep whichever strategy is profitable without rewriting the production stack.
+This lets the system use whichever strategy is actually profitable without rewriting the trading stack.
 
-## Research and production are separate
+## Research and production share strategy code
 
 ```text
 RESEARCH
-historical PIT data
-    -> strategy plugin
-    -> walk-forward/backtest
+historical PIT candidates + hidden realized outcomes
+    -> same OpportunityStrategy plugin
+    -> shared risk/portfolio contracts
+    -> generic historical backtester
     -> scorecard
     -> challenger registry
-    -> shadow/paper evaluation
-    -> explicit promotion
 
-PRODUCTION
-live PIT candidate source
-    -> approved champion strategy
-    -> shared portfolio/risk engine
-    -> broker
-    -> persistent portfolio/order state
-    -> monitoring
+RUNTIME
+live/paper PIT candidates
+    -> same OpportunityStrategy plugin
+    -> shared risk/portfolio contracts
+    -> position manager
+    -> paper/live broker adapter
+    -> durable state + audit
 ```
 
-A profitable backtest may produce a recommendation, but it must never automatically deploy itself live.
+Realized future outcomes are attached only by the research runner. A strategy receives `FeatureSnapshot` values in both paths and therefore cannot depend on a research-only label interface.
 
-## Champion / challenger model
+## Champion / challenger lifecycle
 
-Every strategy has a stable `strategy_id` and a lifecycle stage:
+Every strategy has a stable `strategy_id` and one stage:
 
 - `development`
 - `shadow`
@@ -55,9 +54,28 @@ Every strategy has a stable `strategy_id` and a lifecycle stage:
 - `live`
 - `retired`
 
-The registry stores a scorecard and an externally computed `selection_score`. A configurable profitability gate decides which strategies are eligible for comparison. The registry can recommend a challenger, but champion promotion is explicit.
+Forward promotion is staged:
 
-This means future strategies can be compared on whatever production objective we decide matters most: compounded return, profit factor, drawdown, trade count, consistency, paper performance, or a composite score. The engine itself does not hard-code one research objective.
+```text
+development -> shadow -> paper -> live
+```
+
+Each step has a configurable `ProfitabilityGate`. Paper/live promotion can require an immutable artifact reference. Safety downgrade from live to paper remains available without a profitability gate.
+
+**Stage promotion never changes the champion automatically.** Champion selection is a separate explicit action. A backtest or shadow result can recommend a challenger, but it cannot gain capital authority by itself.
+
+The persistent registry survives restarts and retains metadata for challengers even when their plugins are not currently loaded. A persisted champion cannot execute until its exact plugin is loaded.
+
+## Immutable strategy artifacts
+
+Paper/live strategy artifacts can be represented by `StrategyArtifactManifest`:
+
+- deterministic list of artifact-relative files
+- file sizes
+- SHA-256 per file
+- deterministic manifest SHA-256
+
+Verification fails if a model/config file changes. `StrategyRecord.artifact_ref` can point to the stored manifest rather than a mutable model directory name.
 
 ## Stable contracts
 
@@ -67,120 +85,180 @@ One candidate at one point in time. It carries canonical company/security identi
 
 ### `Opportunity`
 
-The only output a strategy needs to provide:
+The strategy output contract:
 
-- company/security identity
+- company/security/event identity
 - score/rank
 - expected return
 - expected alpha
 - expected downside
 - probability of a positive outcome
-- chosen holding horizon
+- selected holding horizon
 - optional strategy-specific metadata
 
-The runtime verifies that a strategy cannot mutate candidate identity or invent candidates that were not present in the PIT candidate set.
+The runtime rejects invented candidates or changed company/security/event identity.
 
 ### Opportunity risk
 
-Runs before allocation. This is where universal eligibility rules belong, such as a maximum predicted downside or minimum expected return after costs.
-
-Rejecting an opportunity here does not consume a portfolio slot.
+Universal candidate eligibility before portfolio capacity is consumed. Typical rules include maximum predicted downside or minimum expected return after costs.
 
 ### Portfolio policy
 
-Chooses how eligible opportunities compete for capital. The current baseline remains fixed allocation, one active position per company, bounded slots and bounded gross exposure.
-
-Future implementations can add sector/peer concentration, correlation, regime exposure, or optimizer-based capital allocation without changing strategy plugins.
+Chooses how eligible opportunities compete for capital. The baseline is fixed allocation, one active position per company and bounded positions. Sector/peer/correlation optimization can be plugged in later without touching strategy code.
 
 ### Portfolio risk
 
-Runs after proposed allocations. It may reduce or reject allocations but may not increase them. This boundary prevents a risk module from becoming a hidden leverage engine.
+Runs after proposed allocations and may reduce or reject them. It may not increase an allocation. This keeps risk code from becoming a hidden leverage engine.
 
 ### Position manager
 
-Existing positions are managed separately from new-entry opportunity generation. This is where the final system can implement:
+Existing positions are managed independently from new-entry allocation. The position manager sees current candidates and current strategy opportunities, allowing repeat/new signals to trigger thesis review, but it is restricted to sell/reduction orders against already-open positions.
 
-- hold
-- exit
-- reduce
-- extend/shorten horizon
-- thesis re-evaluation after a new event
-
-Repeat events therefore become position-state updates instead of automatically opening tranches.
+`FixedHorizonPositionManager` provides the deterministic baseline: it exits after the strategy-selected number of **observed** market sessions and only reads bars available by the current cycle. Future thesis-aware managers can replace it.
 
 ### Execution broker
 
-The engine emits broker-neutral `OrderIntent` objects. Paper, shadow and live brokers implement the same execution protocol.
+`OrderIntent` is broker-neutral and contains an optional intended execution date. Execution status is explicit:
 
-The broker must return exactly one execution result for every submitted order, which gives monitoring/state code an auditable lifecycle.
+- `queued`
+- `filled`
+- `rejected`
+- `cancelled`
 
-## Intended package layout
+The engine settles previously queued orders before taking the next portfolio snapshot. This permits a strategy decision today to schedule an order for the next market session without pretending it filled immediately.
 
-The current experiment modules remain as research history. Production gradually moves toward:
+### Prepared engine cycle
+
+`PreparedEngineCycle` captures one immutable post-settlement portfolio + PIT candidate view. The champion and shadow challengers can evaluate the exact same context without duplicate ingestion or different portfolio state.
+
+## Shadow challengers
+
+`ShadowStrategyEvaluator` runs loaded strategies in the `shadow` stage against the champion's prepared context.
+
+It applies the same opportunity-risk, portfolio-allocation and portfolio-risk policies to compute realistic **would-trade** selections, but it never creates orders or calls a broker.
+
+`TradingService` therefore runs:
+
+```text
+settle pending orders
+    -> capture portfolio + candidates once
+    -> evaluate shadow challengers with no broker authority
+    -> run champion on the same prepared context
+    -> execute champion orders only
+```
+
+Stateful strategies such as the V5 rolling-calibration adapter advance their own state once per service cycle.
+
+## Persistent paper execution
+
+The included paper execution layer provides:
+
+- atomic durable cash/position state
+- durable pending orders
+- completed execution reports
+- idempotency by order ID across restart/retry
+- future-date order queuing
+- no stale-price fallback for due orders
+- per-side transaction-cost modeling
+- duplicate-company safety rejection
+- partial/full sells
+- mark-to-market `PortfolioSnapshot`
+
+The first DuckDB price adapter uses a same-date daily bar only. A richer intraday/realtime provider can replace the price adapter without changing strategy or engine contracts.
+
+## Auditing
+
+Champion/challenger metadata is atomically persisted. Completed engine cycles can be written to an append-only, fsync-backed JSONL audit journal. Every order/execution/state transition therefore has a durable route into monitoring.
+
+## Current package direction
 
 ```text
 stock_trading/
-    data + existing source modules/
-    features/
+    existing source + feature modules/
+
     engine/
+        artifacts.py
         contracts.py
+        lifecycle.py
+        persistence.py
+        policies.py
         protocols.py
         registry.py
-        policies.py
         runtime.py
+
     strategies/
         v5_adaptive_horizon.py
         future_strategy.py
         ensemble.py
-    portfolio/
-        allocation.py
-        exposure.py
-        peers.py
+
+    research/
+        historical.py
+        walk_forward.py
+
     positions/
-        manager.py
-        thesis.py
+        horizon.py
+        future_thesis_manager.py
+
     execution/
         paper.py
-        live.py
-    research/
-        runner.py
-        scorecards.py
-        promotion.py
+        prices.py
+        future_live_broker.py
+
     live/
         service.py
-    monitoring/
-        events.py
-        reports.py
+
+    experiments/
+        strategy_engine_v5_replay.py
+        legacy V1-V7 experiments remain for reproducibility
 ```
 
-The exact folder split can evolve; the stable engine contracts should not.
+## Architecture migration status
 
-## Migration path
+1. **Engine contracts / authority boundaries** — implemented.
+2. **V5 strategy adapter** — implemented; saved 5/20/60 models can run from generic feature snapshots.
+3. **Unified historical strategy runner** — implemented.
+4. **Exact V5 architecture replay guard** — implemented; local run must reproduce V5 year-by-year before V5 is registered as the first paper champion.
+5. **Persistent strategy registry + audit** — implemented.
+6. **Persistent queued paper execution + portfolio state** — implemented.
+7. **PIT fixed-horizon baseline position management** — implemented.
+8. **Prepared-cycle shadow/champion runtime** — implemented.
+9. **Controlled strategy lifecycle/promotion** — implemented.
+10. **Immutable artifact manifests** — implemented.
 
-1. **Architecture foundation** — contracts, runtime boundaries, registry and safe baseline policies. No model behavior changes.
-2. **V5 adapter** — wrap the current saved adaptive 5/20/60-session model as the first strategy plugin and verify identical opportunity/trade output.
-3. **Unified research runner** — run any registered strategy through the same backtest/scorecard interface rather than adding `lightgbm_profit_v8`, `v9`, etc.
-4. **Persistent strategy/model registry** — artifact hashes, configs, scorecards, stage, champion/challenger history.
-5. **Paper execution + persistent portfolio state** — same engine path as live, different broker adapter.
-6. **Active position manager** — re-score open positions after new events/regime changes.
-7. **Richer portfolio context** — dynamic peers/sector history/correlation/exposure controls.
-8. **Live service + monitoring** — scheduled candidate ingestion, deterministic orders, audit logs, health/status dashboard.
+After exact local V5 replay passes, the core architecture is ready for strategy work again. New approaches should be implemented as `OpportunityStrategy` plugins or shared portfolio/position modules—not as another copy of the trading engine.
+
+## What remains adapter-specific
+
+These are integrations, not missing core architecture:
+
+- live PIT candidate-source assembly from the existing event/feature pipeline
+- whichever real broker API is selected later
+- realtime/intraday price provider if needed
+- UI/dashboard/notifications
+- richer sector/peer/correlation portfolio modules
+- thesis-aware position manager
+
+Those pieces can be added independently without changing the strategy contract.
 
 ## What happens to V1-V7?
 
-Nothing is deleted. They remain reproducible research experiments.
+Nothing is deleted. They remain reproducible research history.
 
-The current adaptive-horizon V5 behavior is the best starting strategy candidate. V6/V7 remain useful evidence about portfolio sizing, but the production architecture no longer needs to inherit either sizing formula. Once V5 is adapted, future improvements become new strategy or portfolio plugins and can be compared on equal footing.
+V5 is the first strategy adapter because it is the current strongest development baseline. V6/V7 remain evidence about capital allocation, but their sizing formulas are not embedded into the production architecture.
+
+Future candidates can be LightGBM variants, sector/peer-aware models, ensembles, different targets or completely different model families. They compete through the same historical runner, scorecard, shadow/paper lifecycle and explicit champion promotion.
 
 ## Non-negotiable integrity rules
 
 - point-in-time data only
 - no label/future-bar leakage
 - canonical company/security identity
-- transaction costs in research
-- deterministic strategy/model artifact references
+- transaction costs in research and paper execution
+- deterministic strategy/model artifacts
 - strategy cannot submit broker orders directly
-- risk cannot silently upsize allocation
-- backtest results cannot silently promote a live strategy
-- paper/live execution share the same runtime path
-- every order/execution/state transition is auditable
+- position management cannot secretly increase exposure
+- portfolio risk cannot silently upsize allocation
+- backtest/shadow results cannot silently promote a champion
+- paper/live execution share the same runtime contracts
+- queued orders settle before the next portfolio snapshot
+- every order/execution/deployment transition is auditable

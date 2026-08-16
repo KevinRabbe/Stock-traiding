@@ -1,3 +1,11 @@
+from .artifacts import (
+    ArtifactFile,
+    StrategyArtifactManifest,
+    build_strategy_artifact_manifest,
+    load_strategy_artifact_manifest,
+    verify_strategy_artifact_manifest,
+    write_strategy_artifact_manifest,
+)
 from .contracts import (
     AllocationIntent,
     EngineCycleResult,
@@ -9,8 +17,10 @@ from .contracts import (
     OrderSide,
     PortfolioPosition,
     PortfolioSnapshot,
+    PreparedEngineCycle,
     StrategyStage,
 )
+from .lifecycle import StrategyLifecycleController, StrategyLifecyclePolicy
 from .persistence import FileStrategyMetadataStore, JsonlEngineAuditObserver
 from .policies import (
     BasicOpportunityRiskPolicy,
@@ -27,10 +37,11 @@ from .registry import (
     StrategyRegistrySnapshot,
     StrategyScorecard,
 )
-from .runtime import TradingEngine
+from .runtime import TradingEngine, validate_strategy_opportunities
 
 __all__ = [
     "AllocationIntent",
+    "ArtifactFile",
     "BasicOpportunityRiskPolicy",
     "EngineCycleResult",
     "ExecutionReport",
@@ -47,7 +58,11 @@ __all__ = [
     "PassThroughPortfolioRiskPolicy",
     "PortfolioPosition",
     "PortfolioSnapshot",
+    "PreparedEngineCycle",
     "ProfitabilityGate",
+    "StrategyArtifactManifest",
+    "StrategyLifecycleController",
+    "StrategyLifecyclePolicy",
     "StrategyMetadataStore",
     "StrategyRecord",
     "StrategyRegistry",
@@ -55,4 +70,9 @@ __all__ = [
     "StrategyScorecard",
     "StrategyStage",
     "TradingEngine",
+    "build_strategy_artifact_manifest",
+    "load_strategy_artifact_manifest",
+    "validate_strategy_opportunities",
+    "verify_strategy_artifact_manifest",
+    "write_strategy_artifact_manifest",
 ]

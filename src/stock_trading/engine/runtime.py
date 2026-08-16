@@ -11,6 +11,7 @@ from .contracts import (
     OrderIntent,
     OrderSide,
     PortfolioSnapshot,
+    PreparedEngineCycle,
 )
 from .protocols import (
     CandidateSource,
@@ -26,7 +27,7 @@ from .protocols import (
 
 
 class TradingEngine:
-    """Strategy-agnostic orchestration for one decision/execution cycle."""
+    """Strategy-agnostic orchestration for decision/execution cycles."""
 
     def __init__(
         self,
@@ -51,10 +52,9 @@ class TradingEngine:
         self._broker = broker
         self._observer = observer
 
-    def run_cycle(self, as_of) -> EngineCycleResult:
-        # Pending orders from prior decisions settle before the portfolio snapshot
-        # used for this cycle. Legacy/test brokers without settle remain supported
-        # while adapters migrate to the full execution protocol.
+    def prepare_cycle(self, as_of) -> PreparedEngineCycle:
+        """Settle old orders, then capture one immutable PIT portfolio/candidate view."""
+
         settle = getattr(self._broker, "settle", None)
         settlements = tuple(settle(as_of)) if settle is not None else ()
         _validate_settlements(settlements)
@@ -62,16 +62,30 @@ class TradingEngine:
         portfolio = self._state_provider.snapshot(as_of)
         if portfolio.as_of != as_of:
             raise ValueError("portfolio snapshot as_of does not match engine cycle")
-
         candidates = self._candidate_source.candidates(as_of)
+        _unique_candidates(candidates)
+        return PreparedEngineCycle(
+            as_of=as_of,
+            portfolio=portfolio,
+            candidates=candidates,
+            settlements=settlements,
+        )
+
+    def run_cycle(self, as_of) -> EngineCycleResult:
+        return self.run_prepared(self.prepare_cycle(as_of))
+
+    def run_prepared(self, prepared: PreparedEngineCycle) -> EngineCycleResult:
+        """Execute the champion against an already captured PIT cycle context."""
+
+        as_of = prepared.as_of
+        portfolio = prepared.portfolio
+        candidates = prepared.candidates
         candidate_by_id = _unique_candidates(candidates)
 
         strategy = self._strategy_provider.active()
         opportunities = strategy.evaluate(candidates, portfolio)
         _validate_opportunities(strategy.strategy_id, opportunities, candidate_by_id)
 
-        # Existing-position logic can react to the latest strategy output, but it
-        # is explicitly prevented from creating or increasing exposure.
         position_orders = self._position_manager.orders(
             portfolio,
             as_of,
@@ -104,11 +118,21 @@ class TradingEngine:
             position_orders=position_orders,
             entry_orders=entry_orders,
             executions=executions,
-            settlements=settlements,
+            settlements=prepared.settlements,
         )
         if self._observer is not None:
             self._observer.record(result)
         return result
+
+
+def validate_strategy_opportunities(
+    strategy_id: str,
+    opportunities: tuple[Opportunity, ...],
+    candidates: tuple[FeatureSnapshot, ...],
+) -> None:
+    """Public validation used by shadow evaluation and the champion runtime."""
+
+    _validate_opportunities(strategy_id, opportunities, _unique_candidates(candidates))
 
 
 def _unique_candidates(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Iterable, Protocol
 
 from .contracts import StrategyStage
 from .protocols import OpportunityStrategy
@@ -147,12 +147,30 @@ class StrategyRegistry:
     def active(self) -> OpportunityStrategy:
         if self._champion_id is None:
             raise RuntimeError("no champion strategy configured")
+        return self.loaded_strategy(self._champion_id)
+
+    def loaded_strategy(self, strategy_id: str) -> OpportunityStrategy:
+        if strategy_id not in self._records:
+            raise KeyError(f"unknown strategy {strategy_id}")
         try:
-            return self._strategies[self._champion_id]
+            return self._strategies[strategy_id]
         except KeyError as exc:
             raise RuntimeError(
-                f"champion strategy plugin {self._champion_id} is not loaded"
+                f"strategy plugin {strategy_id} is not loaded"
             ) from exc
+
+    def loaded_challenger_strategies(
+        self,
+        *,
+        stages: Iterable[StrategyStage] = (StrategyStage.SHADOW, StrategyStage.PAPER),
+    ) -> tuple[OpportunityStrategy, ...]:
+        allowed = set(stages)
+        return tuple(
+            self._strategies[strategy_id]
+            for strategy_id in sorted(self._strategies)
+            if strategy_id != self._champion_id
+            and self._records[strategy_id].stage in allowed
+        )
 
     def record(self, strategy_id: str) -> StrategyRecord:
         try:

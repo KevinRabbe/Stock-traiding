@@ -153,6 +153,20 @@ class ExecutionReport:
 
 
 @dataclass(frozen=True, slots=True)
+class PreparedEngineCycle:
+    """Settled, point-in-time context shared by champion and shadow evaluation."""
+
+    as_of: datetime
+    portfolio: PortfolioSnapshot
+    candidates: tuple[FeatureSnapshot, ...]
+    settlements: tuple[ExecutionReport, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.portfolio.as_of != self.as_of:
+            raise ValueError("prepared portfolio as_of does not match cycle")
+
+
+@dataclass(frozen=True, slots=True)
 class EngineCycleResult:
     as_of: datetime
     strategy_id: str

@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import date, timedelta
+import warnings
 
 import httpx
 
@@ -31,6 +32,7 @@ class MarketBackfillResult:
     reused_metadata_responses: int = 0
     reused_price_responses: int = 0
     skipped_complete_price_series: int = 0
+    skipped_invalid_price_rows: int = 0
 
 
 class MarketBackfillService:
@@ -178,17 +180,25 @@ class MarketBackfillService:
         failed_price_series = 0
         reused_price_responses = 0
         skipped_complete_price_series = 0
+        skipped_invalid_price_rows = 0
 
         for (security_id, ticker), (fetch_start, fetch_end) in sorted(series_to_fetch.items()):
             full_record_id = _price_record_id(ticker, fetch_start, fetch_end)
             raw_full = self.raw_store.latest(Source.TIINGO, full_record_id)
             if raw_full is not None:
                 reused_price_responses += 1
+                invalid_rows = []
                 bars = self.normalizer.parse_prices(
                     raw_full,
                     security_id=security_id,
                     ticker=ticker,
+                    invalid_rows=invalid_rows,
                 )
+                skipped_invalid_price_rows += len(invalid_rows)
+                _warn_invalid_price_rows(ticker, invalid_rows)
+                if invalid_rows and not bars:
+                    failed_price_series += 1
+                    continue
                 self.market_store.put_many(bars)
             else:
                 stored_bounds = self.market_store.date_bounds(security_id, ticker)
@@ -210,11 +220,18 @@ class MarketBackfillService:
                     else:
                         reused_price_responses += 1
 
+                    invalid_rows = []
                     bars = self.normalizer.parse_prices(
                         raw_prices,
                         security_id=security_id,
                         ticker=ticker,
+                        invalid_rows=invalid_rows,
                     )
+                    skipped_invalid_price_rows += len(invalid_rows)
+                    _warn_invalid_price_rows(ticker, invalid_rows)
+                    if invalid_rows and not bars:
+                        failed_price_series += 1
+                        continue
                     self.market_store.put_many(bars)
 
             normalized_bars += self.market_store.count_bars(
@@ -237,6 +254,7 @@ class MarketBackfillService:
             reused_metadata_responses=reused_metadata_responses,
             reused_price_responses=reused_price_responses,
             skipped_complete_price_series=skipped_complete_price_series,
+            skipped_invalid_price_rows=skipped_invalid_price_rows,
         )
 
 
@@ -307,6 +325,20 @@ def _missing_date_ranges(
         if suffix_start <= end:
             missing.append((suffix_start, end))
     return tuple(missing)
+
+
+def _warn_invalid_price_rows(ticker: str, invalid_rows: list) -> None:
+    if not invalid_rows:
+        return
+    first = invalid_rows[0]
+    warnings.warn(
+        (
+            f"Skipped {len(invalid_rows)} invalid Tiingo price row(s) for {ticker}; "
+            f"first issue row={first.row_index} date={first.date or 'unknown'}: {first.reason}"
+        ),
+        RuntimeWarning,
+        stacklevel=2,
+    )
 
 
 def _http_failure_reason(prefix: str, exc: httpx.HTTPError) -> str:

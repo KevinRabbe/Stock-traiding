@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 from datetime import datetime
@@ -32,7 +33,6 @@ class FileRawStore:
 
         extension = _CONTENT_EXTENSIONS.get(record.content_type, ".bin")
         content_path = source_dir / f"{record.artifact_id}{extension}"
-        metadata_path = source_dir / f"{record.artifact_id}.metadata.json"
 
         payload = record.content if isinstance(record.content, bytes) else record.content.encode("utf-8")
         self._write_once(content_path, payload)
@@ -45,6 +45,7 @@ class FileRawStore:
             "content_type": record.content_type,
             "sha256": record.sha256,
         }
+        metadata_path = self._metadata_path_for_record(source_dir, metadata)
         self._write_metadata_once(metadata_path, metadata)
         self._update_loaded_index(record.source, metadata_path)
         return content_path
@@ -123,6 +124,44 @@ class FileRawStore:
         current = index.get(source_record_id)
         if current is None or fetched_at > current[0]:
             index[source_record_id] = (fetched_at, metadata_path, metadata)
+
+    @classmethod
+    def _metadata_path_for_record(cls, source_dir: Path, metadata: dict[str, str]) -> Path:
+        """Return a backward-compatible metadata path for one source record.
+
+        Content identity is the artifact hash, so different source records may
+        legitimately share one immutable content blob. Older stores used only
+        ``<artifact_id>.metadata.json`` and therefore allowed exactly one source
+        record to describe that content. Preserve that legacy path when it is
+        unused or already belongs to this record; otherwise add a deterministic
+        record-scoped metadata alias beside the shared content blob.
+        """
+
+        artifact_id = metadata["artifact_id"]
+        legacy_path = source_dir / f"{artifact_id}.metadata.json"
+        if not legacy_path.exists():
+            return legacy_path
+
+        existing = cls._read_metadata(legacy_path)
+        stable_keys = (
+            "artifact_id",
+            "source",
+            "source_record_id",
+            "content_type",
+            "sha256",
+        )
+        if all(existing.get(key) == metadata.get(key) for key in stable_keys):
+            return legacy_path
+
+        identity = "\0".join(
+            (
+                metadata["source"],
+                metadata["source_record_id"],
+                metadata["content_type"],
+            )
+        )
+        alias = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+        return source_dir / f"{artifact_id}.{alias}.metadata.json"
 
     @staticmethod
     def _read_metadata(path: Path) -> dict[str, str]:

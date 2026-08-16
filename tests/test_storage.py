@@ -94,12 +94,28 @@ def test_raw_store_accepts_same_artifact_refetched_later_and_can_resume(tmp_path
     assert restored.fetched_at == first.fetched_at
 
 
-def test_raw_store_keeps_source_identity_strict_for_same_content_hash(tmp_path) -> None:
+def test_raw_store_allows_distinct_records_to_share_one_content_blob(tmp_path) -> None:
     store = FileRawStore(tmp_path)
-    store.put(_raw(source_record_id="filing-1"))
+    first = _raw(source_record_id="filing-1")
+    second = _raw(source_record_id="different-filing")
 
-    with pytest.raises(ValueError, match="immutable raw artifact collision"):
-        store.put(_raw(source_record_id="different-filing"))
+    first_path = store.put(first)
+    # Build the lazy index before adding the second alias to also exercise the
+    # incremental index update path used by long-running resumable backfills.
+    assert store.latest(Source.SEC_EDGAR, "filing-1") is not None
+    second_path = store.put(second)
+
+    assert first_path == second_path
+    metadata_paths = list(first_path.parent.glob(f"{first.artifact_id}*.metadata.json"))
+    assert len(metadata_paths) == 2
+
+    restored_first = store.latest(Source.SEC_EDGAR, "filing-1")
+    restored_second = store.latest(Source.SEC_EDGAR, "different-filing")
+    assert restored_first is not None
+    assert restored_second is not None
+    assert restored_first.sha256 == restored_second.sha256 == first.sha256
+    assert restored_first.source_record_id == "filing-1"
+    assert restored_second.source_record_id == "different-filing"
 
 
 def test_raw_store_latest_prefers_newest_stored_snapshot(tmp_path) -> None:

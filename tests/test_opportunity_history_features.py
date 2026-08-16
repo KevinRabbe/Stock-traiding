@@ -38,11 +38,6 @@ def test_opportunity_history_uses_strictly_prior_company_rows_and_preserves_orde
     first = _row("first", 1, trigger_count=1)
     second = _row("second", 5, trigger_count=2)
     third = _row("third", 12, trigger_count=1)
-    late = TrainingRow(
-        **{
-            **_row("late", 28, trigger_count=3).__dict__,
-        }
-    ) if False else None
 
     # Deliberately pass rows out of chronological order. Feature state must be
     # derived from timestamps, not caller order, and returned order must be stable.

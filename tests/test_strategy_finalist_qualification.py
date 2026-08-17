@@ -5,10 +5,10 @@ from dataclasses import replace
 
 import pytest
 
+from stock_trading.research import HistoricalYearResult
 from stock_trading.research.historical import (
     HistoricalBacktestResult,
     HistoricalTrade,
-    HistoricalYearResult,
 )
 from stock_trading.research.strategy_factory import StrategyVariantResult, generate_population
 from stock_trading.experiments.lightgbm_strategy_qualify import (

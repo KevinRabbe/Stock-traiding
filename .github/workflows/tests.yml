@@ -33,4 +33,8 @@ jobs:
       - name: Verify current SEC archive URL
         run: python -c "from stock_trading.sec import SecClient; assert SecClient.quarterly_archive_url(2012, 1) == 'https://www.sec.gov/files/structureddata/data/insider-transactions-data-sets/2012q1_form345.zip'"
       - name: Verify experiment CLI imports
-        run: python -W error -m stock_trading.experiments.prepare --help
+        shell: pwsh
+        run: |
+          python -W error -m stock_trading.experiments.prepare --help
+          python -W error -m stock_trading.experiments.lightgbm_strategy_factory_executable_maturity --help
+          python -W error -m stock_trading.experiments.lightgbm_strategy_qualify_executable_maturity --help

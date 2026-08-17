@@ -1,0 +1,16 @@
+{
+  "schema_version": "market-quality-verified-v1",
+  "exclusions": [
+    {
+      "security_id": "security_tiingo_a75b0298e16efea01a30f956b1df5028",
+      "ticker": "MTST",
+      "start_date": "2015-10-08",
+      "end_date": "2015-10-09",
+      "reason": "Tiingo raw and adjusted daily series do not reflect MetaStat Inc.'s SEC-confirmed 1-for-15 reverse stock split effective October 8, 2015; targets spanning this discontinuity are not trustworthy.",
+      "evidence": [
+        "SEC accession 0001415889-15-003417",
+        "https://www.sec.gov/Archives/edgar/data/1404943/000141588915003417/mtst10q_aug312015.htm"
+      ]
+    }
+  ]
+}

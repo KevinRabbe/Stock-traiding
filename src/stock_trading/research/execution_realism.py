@@ -7,7 +7,7 @@ from math import inf
 from pathlib import Path
 from typing import Mapping
 
-from stock_trading.engine import FeatureValue
+from stock_trading.engine.contracts import FeatureValue
 from stock_trading.engine.protocols import (
     OpportunityRiskPolicy,
     OpportunityStrategy,

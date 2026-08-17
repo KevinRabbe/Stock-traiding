@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import date
+from typing import Mapping
 
 from stock_trading.backtest.portfolio import BacktestResult, FixedAllocationBacktester
 
@@ -31,11 +32,28 @@ def annual_walk_forward_splits(
     min_train_rows: int = 1,
     min_validation_rows: int = 1,
     min_test_rows: int = 1,
+    maturity_dates: Mapping[str, date] | None = None,
 ) -> tuple[WalkForwardSplit, ...]:
+    """Build annual point-in-time splits with an optional explicit maturity fence.
+
+    ``TrainingRow.exit_date_20d`` remains the backwards-compatible default. Multi-
+    horizon systems must pass ``maturity_dates`` using the latest realized target
+    date required by the strategy. This prevents a shorter stored target (for
+    example 20 sessions) from admitting a validation row whose longer 60-session
+    outcome was not known before the test year began.
+    """
+
     if min_train_rows <= 0 or min_validation_rows <= 0 or min_test_rows <= 0:
         raise ValueError("minimum row counts must be > 0")
 
     rows = tuple(sorted(rows, key=lambda row: (row.decision_time, row.event_id)))
+    if maturity_dates is not None:
+        missing = sorted({row.event_id for row in rows} - set(maturity_dates))
+        if missing:
+            raise ValueError(
+                "maturity_dates missing rows: " + ", ".join(missing[:5])
+            )
+
     years = sorted({row.decision_time.year for row in rows})
     if first_test_year is not None:
         years = [year for year in years if year >= first_test_year]
@@ -46,8 +64,13 @@ def annual_walk_forward_splits(
         test_start = date(test_year, 1, 1)
 
         # Training happens immediately before the test year. Every training and
-        # validation target must therefore have matured before Jan 1 test_year.
-        eligible = [row for row in rows if row.exit_date_20d < test_start]
+        # validation target required by the strategy must therefore have matured
+        # before Jan 1 test_year.
+        eligible = [
+            row
+            for row in rows
+            if _maturity_date(row, maturity_dates) < test_start
+        ]
         train_rows = tuple(
             row for row in eligible if row.decision_time.year < validation_year
         )
@@ -71,6 +94,15 @@ def annual_walk_forward_splits(
             )
         )
     return tuple(splits)
+
+
+def _maturity_date(
+    row: TrainingRow,
+    maturity_dates: Mapping[str, date] | None,
+) -> date:
+    if maturity_dates is None:
+        return row.exit_date_20d
+    return maturity_dates[row.event_id]
 
 
 def run_annual_walk_forward(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import date
-from typing import Iterable
+from typing import Iterable, Mapping
 
 from stock_trading.market.execution_time import decision_market_date
 from stock_trading.market.labels import build_standard_labels
@@ -88,6 +88,37 @@ def build_multi_horizon_targets(
             )
             for horizon in requested
         }
+    return result
+
+
+def multi_horizon_maturity_dates(
+    rows: Iterable[TrainingRow],
+    targets: Mapping[str, Mapping[int, HorizonTarget]],
+    *,
+    horizons: tuple[int, ...],
+) -> dict[str, date]:
+    """Return the latest realized-label date required by each strategy row.
+
+    A multi-horizon model is point-in-time safe only after every target it trains
+    or calibrates against has matured. The latest requested horizon exit is thus
+    the row's effective maturity fence for walk-forward train/validation splits.
+    """
+
+    requested = tuple(sorted(set(int(horizon) for horizon in horizons)))
+    if not requested or any(horizon <= 0 for horizon in requested):
+        raise ValueError("horizons must contain positive integers")
+
+    result: dict[str, date] = {}
+    for row in rows:
+        by_horizon = targets.get(row.event_id)
+        if by_horizon is None:
+            raise ValueError(f"missing multi-horizon targets for {row.event_id}")
+        missing = [horizon for horizon in requested if horizon not in by_horizon]
+        if missing:
+            raise ValueError(f"missing horizons {missing} for {row.event_id}")
+        result[row.event_id] = max(
+            by_horizon[horizon].exit_date for horizon in requested
+        )
     return result
 
 

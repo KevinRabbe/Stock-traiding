@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import datetime, time, timezone
 from decimal import Decimal, InvalidOperation
 from xml.etree import ElementTree
@@ -20,8 +21,45 @@ from .codes import classify_direction, classify_intent
 _EASTERN = ZoneInfo("America/New_York")
 
 
+@dataclass(frozen=True, slots=True)
+class Form4IssuerIdentity:
+    cik: str
+    name: str
+    ticker: str
+
+
 class Form4XmlParser:
     """Normalize one live EDGAR Form 4 ownership XML document."""
+
+    def issuer_identity(self, raw: RawRecord) -> Form4IssuerIdentity:
+        """Read issuer identity directly from a verified Form 4 ownership document."""
+
+        if raw.source is not Source.SEC_EDGAR:
+            raise ValueError("Form 4 XML RawRecord must use Source.SEC_EDGAR")
+        xml_content = (
+            raw.content
+            if isinstance(raw.content, bytes)
+            else raw.content.encode("utf-8")
+        )
+        root = ElementTree.fromstring(xml_content)
+        document_type = (self._text(root, "documentType") or "").upper()
+        if document_type not in {"4", "4/A"}:
+            raise ValueError("ownership document is not Form 4/4-A")
+
+        cik = self._text(root, "issuer/issuerCik")
+        name = self._text(root, "issuer/issuerName")
+        ticker = self._text(root, "issuer/issuerTradingSymbol")
+        if not cik:
+            raise ValueError("Form 4 XML is missing issuer CIK")
+        if not name:
+            raise ValueError("Form 4 XML is missing issuer name")
+        if not ticker:
+            raise ValueError("Form 4 XML is missing issuer trading symbol")
+        return Form4IssuerIdentity(
+            cik=cik.zfill(10),
+            name=name,
+            ticker=ticker,
+        )
 
     def to_events(
         self,

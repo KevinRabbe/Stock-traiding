@@ -7,9 +7,13 @@ from pathlib import Path
 from stock_trading.core import Source
 from stock_trading.entities import company_id_from_sec_cik
 from stock_trading.market import (
+    ConservativeTiingoResolver,
     DuckDbMarketStore,
     IssuerObservation,
     MarketBackfillService,
+    ResolutionStatus,
+    SecurityMapping,
+    SecurityResolution,
     TiingoClient,
     TiingoNormalizer,
     normalize_tiingo_ticker,
@@ -53,6 +57,89 @@ class CurrentMarketSyncResult:
         return self.unresolved_companies == 0 and self.failed_price_series == 0
 
 
+class _CurrentCoverageTiingoResolver:
+    """Resolve a current SEC issuer using completed-session Tiingo coverage.
+
+    Tiingo EOD metadata defines ``endDate`` as the latest date for which Tiingo
+    has price data, not as a delisting or security-validity date. For a current
+    filing after today's open it is therefore normal for an active ticker's fresh
+    metadata to end at the previous completed session.
+
+    Historical resolution remains conservative and unchanged. At this current
+    boundary we first require fresh provider coverage through ``coverage_through``.
+    We then reuse the historical ticker/name/start-date checks at a date already
+    covered by Tiingo and publish an open-ended mapping only after those checks
+    pass. Provider coverage that lags the completed exchange session still fails
+    closed.
+    """
+
+    def __init__(self, coverage_through: date) -> None:
+        self.coverage_through = coverage_through
+        self._historical = ConservativeTiingoResolver()
+
+    def resolve(
+        self,
+        observation: IssuerObservation,
+        *,
+        tiingo_ticker: str,
+        tiingo_name: str,
+        tiingo_start: date,
+        tiingo_end: date | None,
+        exchange_code: str | None = None,
+    ) -> SecurityResolution:
+        if tiingo_end is None:
+            return SecurityResolution(
+                ResolutionStatus.UNRESOLVED,
+                observation,
+                None,
+                "tiingo_has_no_price_coverage",
+            )
+        if tiingo_end < self.coverage_through:
+            return SecurityResolution(
+                ResolutionStatus.UNRESOLVED,
+                observation,
+                None,
+                "tiingo_history_lags_completed_session",
+            )
+
+        covered_observation = IssuerObservation(
+            sec_cik=observation.sec_cik,
+            issuer_name=observation.issuer_name,
+            ticker=observation.ticker,
+            observed_date=min(observation.observed_date, tiingo_end),
+        )
+        validated = self._historical.resolve(
+            covered_observation,
+            tiingo_ticker=tiingo_ticker,
+            tiingo_name=tiingo_name,
+            tiingo_start=tiingo_start,
+            tiingo_end=tiingo_end,
+            exchange_code=exchange_code,
+        )
+        if not validated.resolved or validated.mapping is None:
+            return SecurityResolution(
+                ResolutionStatus.UNRESOLVED,
+                observation,
+                None,
+                validated.reason,
+            )
+
+        mapping = SecurityMapping(
+            company_id=validated.mapping.company_id,
+            security_id=validated.mapping.security_id,
+            ticker=validated.mapping.ticker,
+            exchange_code=validated.mapping.exchange_code,
+            valid_from=validated.mapping.valid_from,
+            valid_to=None,
+        )
+        return SecurityResolution(
+            ResolutionStatus.RESOLVED,
+            observation,
+            mapping,
+            "current_ticker_name_match_with_completed_session_coverage",
+        )
+
+
 def sync_pending_current_market(
     pending: tuple[PendingTrigger, ...],
     *,
@@ -65,10 +152,10 @@ def sync_pending_current_market(
     """Refresh only the market identities/series required by one pending batch.
 
     Current Form 4 XML is the issuer-identity source. Tiingo metadata is fetched
-    fresh on every actionable batch before resolution; this intentionally bypasses
-    historical metadata snapshots whose provider ``endDate`` can otherwise make
-    an active company/security mapping look expired. Price data is then extended
-    only through the last completed XNYS session supplied by the caller.
+    fresh on every actionable batch before resolution. ``endDate`` is interpreted
+    as a price-history coverage watermark, never as a current security-validity
+    boundary. Price data is then extended only through the last completed XNYS
+    session supplied by the caller.
     """
 
     if not pending:
@@ -158,6 +245,7 @@ def sync_pending_current_market(
         client=tiingo_client,
         raw_store=raw_store,
         market_store=market_store,
+        resolver=_CurrentCoverageTiingoResolver(sync_end_date),
     ).backfill(
         tuple(observations),
         start=market_start,

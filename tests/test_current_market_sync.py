@@ -50,7 +50,8 @@ def _price_payload(day: str, close: float) -> bytes:
 
 
 class _Tiingo:
-    def __init__(self):
+    def __init__(self, *, metadata_end: str = "2026-08-17"):
+        self.metadata_end = metadata_end
         self.metadata_tickers = []
         self.price_tickers = []
 
@@ -63,7 +64,7 @@ class _Tiingo:
                 "name": names[ticker],
                 "exchangeCode": "NASDAQ",
                 "startDate": "1987-08-20",
-                "endDate": "2026-08-17",
+                "endDate": self.metadata_end,
             }
         ).encode("utf-8")
         return _raw(Source.TIINGO, f"metadata:{ticker}", "application/json", content)
@@ -78,6 +79,18 @@ class _Tiingo:
             "application/json",
             _price_payload("2026-08-17", close),
         )
+
+
+def _put_form4(raw_store: FileRawStore, accession: str) -> None:
+    form4 = b"""<ownershipDocument>
+      <documentType>4</documentType>
+      <issuer>
+        <issuerCik>0000815556</issuerCik>
+        <issuerName>FASTENAL CO</issuerName>
+        <issuerTradingSymbol>FAST</issuerTradingSymbol>
+      </issuer>
+    </ownershipDocument>"""
+    raw_store.put(_raw(Source.SEC_EDGAR, accession, "application/xml", form4))
 
 
 def test_form4_parser_exposes_issuer_identity() -> None:
@@ -97,32 +110,26 @@ def test_form4_parser_exposes_issuer_identity() -> None:
     assert identity.ticker == "FAST"
 
 
-def test_targeted_current_market_sync_refreshes_mapping_and_completed_bars(tmp_path) -> None:
+def test_targeted_current_market_sync_treats_end_date_as_completed_coverage(tmp_path) -> None:
     data_root = tmp_path / "data"
     raw_store = FileRawStore(data_root / "raw")
     accession = "0001454708-26-000010"
-    form4 = b"""<ownershipDocument>
-      <documentType>4</documentType>
-      <issuer>
-        <issuerCik>0000815556</issuerCik>
-        <issuerName>FASTENAL CO</issuerName>
-        <issuerTradingSymbol>FAST</issuerTradingSymbol>
-      </issuer>
-    </ownershipDocument>"""
-    raw_store.put(_raw(Source.SEC_EDGAR, accession, "application/xml", form4))
+    _put_form4(raw_store, accession)
 
     company_id = company_id_from_sec_cik("0000815556")
     pending = (
         PendingTrigger(
             event_id="evt-current",
             company_id=company_id,
-            public_time=datetime(2026, 8, 17, 15, 16, tzinfo=UTC),
+            # Current filing is published on Aug 18 while fresh EOD metadata
+            # correctly ends at the last completed XNYS session, Aug 17.
+            public_time=datetime(2026, 8, 18, 14, 38, tzinfo=UTC),
             cik="0000815556",
             accession_number=accession,
         ),
     )
     market_store = DuckDbMarketStore(data_root / "normalized" / "market.duckdb")
-    tiingo = _Tiingo()
+    tiingo = _Tiingo(metadata_end="2026-08-17")
 
     result = sync_pending_current_market(
         pending,
@@ -140,10 +147,49 @@ def test_targeted_current_market_sync_refreshes_mapping_and_completed_bars(tmp_p
     assert result.tickers == ("FAST",)
     assert tiingo.metadata_tickers == ["FAST"]
     assert set(tiingo.price_tickers) == {"FAST", "SPY"}
-    security_id = market_store.security_for_company(company_id, date(2026, 8, 17))
+    # The mapping is current/open-ended even though provider coverage ends one
+    # completed session before the filing's publication date.
+    security_id = market_store.security_for_company(company_id, date(2026, 8, 18))
     assert security_id is not None
     assert market_store.bar_on(security_id, date(2026, 8, 17)) is not None
     assert market_store.bar_on("benchmark_spy", date(2026, 8, 17)) is not None
+
+
+def test_targeted_current_market_sync_rejects_provider_coverage_lag(tmp_path) -> None:
+    data_root = tmp_path / "data"
+    raw_store = FileRawStore(data_root / "raw")
+    accession = "0001454708-26-000010"
+    _put_form4(raw_store, accession)
+
+    company_id = company_id_from_sec_cik("0000815556")
+    pending = (
+        PendingTrigger(
+            event_id="evt-current",
+            company_id=company_id,
+            public_time=datetime(2026, 8, 18, 14, 38, tzinfo=UTC),
+            cik="0000815556",
+            accession_number=accession,
+        ),
+    )
+    market_store = DuckDbMarketStore(data_root / "normalized" / "market.duckdb")
+    tiingo = _Tiingo(metadata_end="2026-08-14")
+
+    result = sync_pending_current_market(
+        pending,
+        data_root=data_root,
+        market_store=market_store,
+        benchmark_security_id="benchmark_spy",
+        tiingo_client=tiingo,  # type: ignore[arg-type]
+        sync_end_date=date(2026, 8, 17),
+    )
+
+    assert result.ready is False
+    assert result.resolved_companies == 0
+    assert result.unresolved_companies == 1
+    assert [item.reason for item in result.failures] == [
+        "tiingo_history_lags_completed_session"
+    ]
+    assert market_store.security_for_company(company_id, date(2026, 8, 18)) is None
 
 
 def test_last_completed_session_does_not_use_preopen_today() -> None:

@@ -45,6 +45,12 @@ class RuntimeVerification:
             )
         )
 
+    @property
+    def champion_plugin_restored(self) -> bool:
+        return any(
+            item.champion and item.plugin_restored for item in self.artifacts
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class LoadedRuntimeRegistry:
@@ -56,12 +62,13 @@ class LoadedRuntimeRegistry:
 def verify_paper_shadow_runtime(
     runtime_dir: str | Path = "data/runtime",
 ) -> RuntimeVerification:
-    """Verify persisted strategy metadata and every active artifact.
+    """Verify persisted strategy metadata and restore every self-contained plugin.
 
-    Frozen SHADOW plugins are also deserialized from their verified manifests.
-    The legacy V5 PAPER champion is intentionally manifest-verified only because
-    its calibration state is not yet serialized in the bootstrap artifact. Runtime
-    execution must inject the already-constructed champion plugin explicitly.
+    Frozen SHADOW plugins are always deserialized from verified manifests. A PAPER
+    or LIVE champion is also restored when its artifact is self-contained (marked
+    by the same frozen strategy metadata used by factory artifacts). Legacy V5
+    bootstrap manifests that contain only model files remain verification-only and
+    continue to require explicit champion injection until migrated.
     """
 
     runtime_root = Path(runtime_dir)
@@ -92,7 +99,13 @@ def verify_paper_shadow_runtime(
 
         restored = False
         if record.strategy_id == champion_id:
-            restored = False
+            if _is_self_contained_frozen_artifact(manifest.root):
+                strategy = load_frozen_factory_strategy_from_manifest(manifest_path)
+                if strategy.strategy_id != record.strategy_id:
+                    raise ValueError(
+                        f"restored strategy_id mismatch for {record.strategy_id}"
+                    )
+                restored = True
         elif record.stage is StrategyStage.SHADOW:
             strategy = load_frozen_factory_strategy_from_manifest(manifest_path)
             if strategy.strategy_id != record.strategy_id:
@@ -126,31 +139,49 @@ def verify_paper_shadow_runtime(
 
 
 def load_persisted_shadow_registry(
-    champion_strategy: OpportunityStrategy,
+    champion_strategy: OpportunityStrategy | None = None,
     *,
     runtime_dir: str | Path = "data/runtime",
 ) -> LoadedRuntimeRegistry:
     """Restore the persisted champion/challenger registry for a service process.
 
-    The V5 champion is supplied by the caller because bootstrap currently freezes
-    only its model directory, not the rolling calibration state needed to restore
-    the plugin autonomously. Every SHADOW challenger is restored directly from its
-    immutable manifest. No metadata or lifecycle state is modified here.
+    When the champion manifest is self-contained, ``champion_strategy`` may be
+    omitted and the exact champion plugin is restored from disk. Older bootstrap
+    manifests remain supported but require the caller to inject the champion
+    explicitly. Every SHADOW challenger is always restored from its immutable
+    manifest. No metadata or lifecycle state is modified here.
     """
 
     verification = verify_paper_shadow_runtime(runtime_dir)
-    if champion_strategy.strategy_id != verification.champion_id:
+    metadata_store = FileStrategyMetadataStore(verification.registry_path)
+    snapshot = metadata_store.load()
+    if snapshot is None:
+        raise RuntimeError("strategy registry disappeared during runtime load")
+    records = {item.strategy_id: item for item in snapshot.records}
+    champion_record = records.get(verification.champion_id)
+    if champion_record is None:
+        raise RuntimeError("persisted champion record disappeared during runtime load")
+
+    if champion_strategy is None:
+        if not verification.champion_plugin_restored:
+            raise RuntimeError(
+                "persisted champion artifact is not self-contained; inject the exact "
+                "champion strategy or migrate its calibration state first"
+            )
+        champion_strategy = load_frozen_factory_strategy_from_manifest(
+            _artifact_path(champion_record)
+        )
+    elif champion_strategy.strategy_id != verification.champion_id:
         raise ValueError(
             "injected champion strategy_id does not match persisted champion"
         )
 
-    metadata_store = FileStrategyMetadataStore(verification.registry_path)
+    if champion_strategy.strategy_id != verification.champion_id:
+        raise RuntimeError("restored champion strategy_id does not match persisted champion")
+
     registry = StrategyRegistry(metadata_store=metadata_store)
     registry.register(champion_strategy)
 
-    snapshot = metadata_store.load()
-    if snapshot is None:
-        raise RuntimeError("strategy registry disappeared during runtime load")
     for record in snapshot.records:
         if record.strategy_id == verification.champion_id:
             continue
@@ -187,7 +218,9 @@ def runtime_verification_payload(result: RuntimeVerification) -> dict[str, Any]:
         "registry_path": str(result.registry_path),
         "champion_id": result.champion_id,
         "champion_plugin_restore": (
-            "injected_required_until_v5_calibration_is_serialized"
+            "autonomous_from_verified_manifest"
+            if result.champion_plugin_restored
+            else "injected_required_until_v5_calibration_is_serialized"
         ),
         "shadow_strategy_ids": list(result.shadow_strategy_ids),
         "artifacts": [
@@ -210,3 +243,7 @@ def _artifact_path(record: StrategyRecord) -> Path:
             f"active strategy {record.strategy_id} has no artifact_ref"
         )
     return Path(record.artifact_ref)
+
+
+def _is_self_contained_frozen_artifact(root: str | Path) -> bool:
+    return (Path(root) / "strategy.json").is_file()

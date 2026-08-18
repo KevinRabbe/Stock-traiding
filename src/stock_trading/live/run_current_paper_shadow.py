@@ -29,6 +29,7 @@ from .current_cycle_receipt import (
     CurrentCycleReceipt,
     FileCurrentCycleReceiptStore,
     batch_id,
+    reconcile_completed_receipts,
 )
 from .event_intake import DurablePendingTriggerProvider, FileCurrentEventQueue
 from .pending_disposition import (
@@ -101,12 +102,16 @@ def run_current_paper_shadow_cycle(
     market_store.enable_read_cache(max_series=16)
     event_store = DuckDbEventStore(data_root / "normalized" / "events.duckdb")
     queue = FileCurrentEventQueue(runtime_dir / "current_event_intake.json")
+    receipt_store = FileCurrentCycleReceiptStore(
+        runtime_dir / "current_cycle_receipts"
+    )
+    receipt_reconciliation = reconcile_completed_receipts(queue, receipt_store)
+
     provider = DurablePendingTriggerProvider(
         queue=queue,
         event_store=event_store,
         session_resolver=resolver,
     )
-
     selected_events = provider.events(cutoff)
     selection = provider.last_selection
     if selection is None:
@@ -125,6 +130,14 @@ def run_current_paper_shadow_cycle(
     base_payload = {
         "as_of": cutoff.isoformat(),
         "target_execution_date": selection.target_execution_date.isoformat(),
+        "receipt_reconciliation": {
+            "receipt_count": receipt_reconciliation.receipt_count,
+            "matched_receipt_count": receipt_reconciliation.matched_receipt_count,
+            "acknowledged_pending_event_count": (
+                receipt_reconciliation.acknowledged_pending_event_count
+            ),
+            "matched_batch_ids": list(receipt_reconciliation.matched_batch_ids),
+        },
         "stale_disposition": {
             "selected_count": stale_result.selected_count,
             "recorded_count": stale_result.recorded_count,
@@ -146,9 +159,6 @@ def run_current_paper_shadow_cycle(
     current_batch_id = batch_id(
         selection.target_execution_date,
         tuple(selection.selected_event_ids),
-    )
-    receipt_store = FileCurrentCycleReceiptStore(
-        runtime_dir / "current_cycle_receipts"
     )
     existing_receipt = receipt_store.load(current_batch_id)
     if existing_receipt is not None:

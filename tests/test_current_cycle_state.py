@@ -16,6 +16,7 @@ from stock_trading.live.current_cycle_receipt import (
     CurrentCycleReceipt,
     FileCurrentCycleReceiptStore,
     batch_id,
+    reconcile_completed_receipts,
 )
 from stock_trading.live.event_intake import (
     CurrentEventIntakeState,
@@ -170,6 +171,57 @@ def test_current_cycle_receipt_is_deterministic_and_reloadable(tmp_path) -> None
     assert path.is_file()
     assert store.load(identity) == receipt
     assert batch_id(target, tuple(reversed(events))) == identity
+
+
+def test_completed_receipt_reconciles_pending_before_session_classification(tmp_path) -> None:
+    target = date(2026, 8, 18)
+    public_time = datetime(2026, 8, 17, 20, 0, tzinfo=UTC)
+    event_id = "evt-completed"
+    queue = FileCurrentEventQueue(tmp_path / "current_event_intake.json")
+    queue._save(  # noqa: SLF001 - crash-recovery boundary test
+        CurrentEventIntakeState(
+            watermarks={
+                "0000000001": FilingCursor(
+                    public_time,
+                    "0000000001-26-000001",
+                )
+            },
+            pending=(
+                PendingTrigger(
+                    event_id=event_id,
+                    company_id="company-a",
+                    public_time=public_time,
+                    cik="0000000001",
+                    accession_number="0000000001-26-000001",
+                ),
+            ),
+        )
+    )
+    identity = batch_id(target, (event_id,))
+    receipt_store = FileCurrentCycleReceiptStore(tmp_path / "receipts")
+    receipt_store.write(
+        CurrentCycleReceipt(
+            batch_id=identity,
+            completed_at=datetime(2026, 8, 18, 13, 0, tzinfo=UTC),
+            target_execution_date=target,
+            selected_event_ids=(event_id,),
+            candidate_ids=("opportunity:company-a:2026-08-18",),
+            champion_strategy_id="champion",
+            champion_entry_order_ids=("ord-a",),
+            shadow_strategy_ids=("shadow-a",),
+        )
+    )
+
+    result = reconcile_completed_receipts(queue, receipt_store)
+
+    assert result.receipt_count == 1
+    assert result.matched_receipt_count == 1
+    assert result.acknowledged_pending_event_count == 1
+    assert result.matched_batch_ids == (identity,)
+    assert queue.pending() == ()
+    second = reconcile_completed_receipts(queue, receipt_store)
+    assert second.matched_receipt_count == 0
+    assert second.acknowledged_pending_event_count == 0
 
 
 def _strategy_with_history(score: float) -> V5AdaptiveHorizonStrategy:

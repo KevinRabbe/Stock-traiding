@@ -113,6 +113,20 @@ class SecClient:
             sha256=content_sha256(content),
         )
 
+    def fetch_submissions_raw(self, cik: str) -> RawRecord:
+        """Fetch one mutable SEC submissions document as an immutable raw snapshot."""
+
+        normalized = cik.strip().lstrip("0").zfill(10)
+        content = self._get(self.submissions_url(normalized)).content
+        return RawRecord(
+            source=Source.SEC_EDGAR,
+            source_record_id=f"submissions:CIK{normalized}",
+            fetched_at=datetime.now(timezone.utc),
+            content_type="application/json",
+            content=content,
+            sha256=content_sha256(content),
+        )
+
     def fetch_submissions(self, cik: str) -> dict:
         return self._get(self.submissions_url(cik)).json()
 

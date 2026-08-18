@@ -92,5 +92,5 @@ def test_existing_self_contained_artifact_requires_replay_verification(tmp_path:
     assert result == {"return": 0.0, "trades": 0}
 
     metadata.write_text(json.dumps({"training": {}}), encoding="utf-8")
-    with pytest.raises(ValueError, match="lacks serialized replay verification"):
+    with pytest.raises(ValueError, match="invalid self-contained V5 metadata"):
         _verification_from_metadata(metadata)

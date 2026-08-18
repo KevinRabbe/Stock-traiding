@@ -46,6 +46,14 @@ class XnysExecutionSessionResolver:
                 return eastern_day
         return self._first_session_after(eastern_day)
 
+    def session_open(self, session_date: date) -> datetime:
+        """Return the authoritative XNYS regular-session open in UTC."""
+
+        sessions = self._calendar.sessions_in_range(session_date, session_date)
+        if len(sessions) != 1:
+            raise ValueError(f"{session_date.isoformat()} is not an XNYS session")
+        return as_utc(self._calendar.session_open(sessions[0]).to_pydatetime())
+
     def last_completed_session(self, as_of: datetime) -> date:
         cutoff = as_utc(as_of)
         eastern_day = decision_market_date(cutoff)

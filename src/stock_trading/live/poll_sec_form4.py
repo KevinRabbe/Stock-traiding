@@ -111,6 +111,11 @@ def main() -> None:
             "SEC_USER_AGENT is required and must identify the application/contact"
         )
 
+    # Resolve the exchange calendar before any current-source mutation. A missing
+    # runtime dependency or invalid calendar must fail before SEC fetches, raw
+    # writes, event writes, watermark changes, or quarantine changes begin.
+    resolver = XnysExecutionSessionResolver()
+
     ciks = _modeled_ciks(
         args.data_root / "manifests" / "sec_companies.jsonl",
         args.experiment_dir / "training_rows.jsonl",
@@ -130,7 +135,6 @@ def main() -> None:
             initial_lookback_days=args.initial_lookback_days,
         ).poll(ciks, as_of=as_of)
 
-    resolver = XnysExecutionSessionResolver()
     provider = DurablePendingTriggerProvider(
         queue=queue,
         event_store=event_store,

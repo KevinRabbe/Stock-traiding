@@ -41,6 +41,11 @@ class FileForm4Quarantine:
     specific accession could not be parsed before the current-event queue advances
     its source watermark. Re-recording the same accession/raw artifact is
     idempotent, which keeps crash recovery safe.
+
+    A quarantine record can be resolved only after a separate recovery path has
+    durably persisted the replacement raw artifact, normalized events, queue state,
+    and recovery audit record. Removing it then means "no longer unresolved"; it
+    does not erase the original raw artifact or the recovery audit trail.
     """
 
     SCHEMA_VERSION = 1
@@ -89,6 +94,23 @@ class FileForm4Quarantine:
             return False
         records[key] = item
         self._save(tuple(sorted(records.values())))
+        return True
+
+    def resolve(self, cik: str, accession_number: str) -> bool:
+        """Remove one now-recovered accession from the active quarantine."""
+
+        key = (str(cik).strip(), str(accession_number).strip())
+        if not all(key):
+            raise ValueError("quarantine resolution identity must not be empty")
+        records = self.load()
+        kept = tuple(
+            record
+            for record in records
+            if (record.cik, record.accession_number) != key
+        )
+        if len(kept) == len(records):
+            return False
+        self._save(kept)
         return True
 
     def _save(self, records: tuple[QuarantinedForm4Filing, ...]) -> None:

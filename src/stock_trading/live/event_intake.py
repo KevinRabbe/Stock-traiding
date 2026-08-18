@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Iterable
@@ -319,18 +319,20 @@ class SecCurrentForm4Poller:
 
 @dataclass(frozen=True, slots=True)
 class PendingBatchSelection:
-    target_execution_date: object
+    target_execution_date: date
     selected_event_ids: tuple[str, ...]
     stale_event_ids: tuple[str, ...]
     future_event_ids: tuple[str, ...]
 
 
 class DurablePendingTriggerProvider:
-    """Expose only pending events assigned to the current intended session.
+    """Expose only pending events assigned to a still-tradable intended session.
 
-    Each event's intended session is derived from its own public timestamp. This
-    prevents a restarted process from silently moving yesterday's missed filing to
-    a later open. Stale IDs remain pending until an explicit caller disposition.
+    Each event's intended session is derived from its own public timestamp. The
+    cycle target is resolved separately when the calendar adapter supports it: a
+    pre-open restart can still target today's open, while an event whose intended
+    open has already passed remains stale instead of being moved to a later day.
+    Stale IDs remain pending until an explicit caller disposition.
     """
 
     def __init__(
@@ -347,7 +349,12 @@ class DurablePendingTriggerProvider:
 
     def events(self, as_of: datetime) -> tuple[Event, ...]:
         cutoff = as_utc(as_of)
-        target = self.session_resolver.execution_date(cutoff)
+        cycle_resolver = getattr(self.session_resolver, "cycle_execution_date", None)
+        target = (
+            cycle_resolver(cutoff)
+            if callable(cycle_resolver)
+            else self.session_resolver.execution_date(cutoff)
+        )
         selected: list[PendingTrigger] = []
         stale: list[PendingTrigger] = []
         future: list[PendingTrigger] = []

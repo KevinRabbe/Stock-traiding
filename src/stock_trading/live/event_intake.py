@@ -7,12 +7,14 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Iterable
+from xml.etree import ElementTree
 
 from stock_trading.core import Event, Source, as_utc
 from stock_trading.sec import Form4XmlParser, SecClient, SubmissionsParser
 from stock_trading.storage import DuckDbEventStore, FileRawStore
 
 from .candidates import ExecutionSessionResolver
+from .form4_quarantine import FileForm4Quarantine, QuarantinedForm4Filing
 
 
 @dataclass(frozen=True, order=True, slots=True)
@@ -220,13 +222,22 @@ class SecCurrentPollResult:
     company_count: int
     submissions_fetched: int
     filings_committed: int
+    filings_quarantined: int
     events_normalized: int
     pending_events_added: int
     pending_event_count: int
+    quarantine_count: int
+    quarantined_filings: tuple[QuarantinedForm4Filing, ...] = ()
 
 
 class SecCurrentForm4Poller:
-    """Poll recent Form 4/4-A filings into raw, normalized and pending stores."""
+    """Poll recent Form 4/4-A filings into raw, normalized and pending stores.
+
+    Source documents that are malformed or unsupported by the strict Form 4
+    normalizer are preserved in raw storage and durably quarantined. One bad SEC
+    accession therefore cannot halt current intake for the entire modeled
+    universe, while no event is invented from a document we could not parse.
+    """
 
     def __init__(
         self,
@@ -235,6 +246,7 @@ class SecCurrentForm4Poller:
         raw_store: FileRawStore,
         event_store: DuckDbEventStore,
         queue: FileCurrentEventQueue,
+        quarantine: FileForm4Quarantine | None = None,
         initial_lookback_days: int = 7,
     ) -> None:
         if initial_lookback_days <= 0:
@@ -243,6 +255,9 @@ class SecCurrentForm4Poller:
         self.raw_store = raw_store
         self.event_store = event_store
         self.queue = queue
+        self.quarantine = quarantine or FileForm4Quarantine(
+            queue.path.with_name("form4_quarantine.json")
+        )
         self.initial_lookback_days = initial_lookback_days
         self.submissions_parser = SubmissionsParser()
         self.form4_parser = Form4XmlParser()
@@ -254,6 +269,7 @@ class SecCurrentForm4Poller:
         filings_committed = 0
         events_normalized = 0
         pending_added = 0
+        quarantined_this_poll: list[QuarantinedForm4Filing] = []
 
         for cik in normalized_ciks:
             submissions_raw = self.client.fetch_submissions_raw(cik)
@@ -287,15 +303,40 @@ class SecCurrentForm4Poller:
                         filing.primary_document,
                     )
                     self.raw_store.put(filing_raw)
-                if filing_raw.content_type != "application/xml":
-                    raise ValueError(
-                        f"SEC filing raw artifact is not XML: {filing.accession_number}"
+
+                try:
+                    if filing_raw.content_type != "application/xml":
+                        raise ValueError(
+                            f"SEC filing raw artifact is not XML: {filing.accession_number}"
+                        )
+                    events = self.form4_parser.to_events(
+                        filing_raw,
+                        accepted_at=filing.accepted_at,
+                        ingested_at=filing_raw.fetched_at,
                     )
-                events = self.form4_parser.to_events(
-                    filing_raw,
-                    accepted_at=filing.accepted_at,
-                    ingested_at=filing_raw.fetched_at,
-                )
+                except (ElementTree.ParseError, ValueError) as exc:
+                    quarantined = QuarantinedForm4Filing(
+                        accepted_at=filing.accepted_at,
+                        cik=_normalized_cik(filing.cik),
+                        accession_number=filing.accession_number,
+                        raw_artifact_id=filing_raw.artifact_id,
+                        error_type=type(exc).__name__,
+                        error_message=str(exc),
+                    )
+                    self.quarantine.record(quarantined)
+                    # Advance only after durable quarantine. If the process dies
+                    # before this call, the same immutable raw artifact is retried
+                    # and quarantine.record() is idempotent.
+                    self.queue.commit_filing(
+                        cik=cik,
+                        accession_number=filing.accession_number,
+                        accepted_at=filing.accepted_at,
+                        events=(),
+                    )
+                    quarantined_this_poll.append(quarantined)
+                    previous = cursor
+                    continue
+
                 self.event_store.put_many(events)
                 pending_added += self.queue.commit_filing(
                     cik=cik,
@@ -307,13 +348,17 @@ class SecCurrentForm4Poller:
                 filings_committed += 1
                 previous = cursor
 
+        all_quarantined = self.quarantine.load()
         return SecCurrentPollResult(
             company_count=len(normalized_ciks),
             submissions_fetched=submissions_fetched,
             filings_committed=filings_committed,
+            filings_quarantined=len(quarantined_this_poll),
             events_normalized=events_normalized,
             pending_events_added=pending_added,
             pending_event_count=len(self.queue.pending()),
+            quarantine_count=len(all_quarantined),
+            quarantined_filings=tuple(quarantined_this_poll),
         )
 
 

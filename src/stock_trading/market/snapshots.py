@@ -114,6 +114,78 @@ class CandidateSnapshotBuilder:
             market_features=build_market_features(stock_history, benchmark_history),
         )
 
+    def build_for_execution_date(
+        self,
+        event: Event,
+        execution_date: date,
+    ) -> CandidateSnapshot:
+        """Build a live/PAPER snapshot for an externally resolved future session.
+
+        Unlike :meth:`build`, this method never requires an execution-day market
+        bar. The execution date must come from a market-calendar/session boundary
+        outside the model feature builder. All model features use completed bars
+        strictly before the event's publication market date.
+
+        If stored market history already proves that another trading session
+        occurred between publication and ``execution_date``, fail closed rather
+        than silently allowing a caller to shift the opportunity to a later open.
+        """
+
+        if not event.company_id:
+            raise ValueError("candidate event must have a canonical company_id")
+        decision_day = decision_market_date(event.public_time)
+        if execution_date <= decision_day:
+            raise ValueError("execution_date must be after publication market date")
+
+        security_id = self.market_store.security_for_company(event.company_id, decision_day)
+        if security_id is None:
+            raise ValueError("no verified security mapping available for candidate company")
+
+        known_stock_next = self.market_store.next_bar_after(security_id, decision_day)
+        if known_stock_next is not None and known_stock_next.date < execution_date:
+            raise ValueError("execution_date skips a known candidate trading session")
+        known_benchmark_next = self.market_store.next_bar_after(
+            self.benchmark_security_id,
+            decision_day,
+        )
+        if known_benchmark_next is not None and known_benchmark_next.date < execution_date:
+            raise ValueError("execution_date skips a known benchmark trading session")
+
+        stock_history = self.market_store.bars_before(
+            security_id,
+            decision_day,
+            self.feature_lookback_bars,
+        )
+        benchmark_history = self.market_store.bars_before(
+            self.benchmark_security_id,
+            decision_day,
+            self.feature_lookback_bars,
+        )
+        if not stock_history:
+            raise ValueError("candidate security has no completed market history before publication")
+        if not benchmark_history:
+            raise ValueError("benchmark has no completed market history before publication")
+
+        execution_ticker = (
+            known_stock_next.ticker
+            if known_stock_next is not None and known_stock_next.date == execution_date
+            else stock_history[-1].ticker
+        )
+        return CandidateSnapshot(
+            event_id=event.event_id,
+            company_id=event.company_id,
+            security_id=security_id,
+            decision_time=event.public_time,
+            decision_market_date=decision_day,
+            execution_date=execution_date,
+            first_tradable_time=conservative_first_tradable_time(
+                event.public_time,
+                execution_date,
+            ),
+            execution_ticker=execution_ticker,
+            market_features=build_market_features(stock_history, benchmark_history),
+        )
+
     def label(self, snapshot: CandidateSnapshot) -> LabeledCandidate:
         max_horizon = max(self.label_horizons)
         stock_future = self.market_store.bars_from(

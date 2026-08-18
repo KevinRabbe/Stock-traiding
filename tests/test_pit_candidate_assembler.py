@@ -130,8 +130,14 @@ def test_scheduled_snapshot_needs_no_execution_day_bar_and_rejects_skipped_sessi
 
 
 class _ParitySnapshotBuilder:
-    def __init__(self, current_event_id: str) -> None:
+    def __init__(
+        self,
+        current_event_id: str,
+        *,
+        current_historical_available: bool,
+    ) -> None:
         self.current_event_id = current_event_id
+        self.current_historical_available = current_historical_available
 
     def _snapshot(self, event: Event, execution_date: date) -> CandidateSnapshot:
         return CandidateSnapshot(
@@ -166,7 +172,9 @@ class _ParitySnapshotBuilder:
 
     def build(self, event: Event) -> CandidateSnapshot:
         if event.event_id == self.current_event_id:
-            raise ValueError("future bar intentionally unavailable")
+            if not self.current_historical_available:
+                raise ValueError("future bar intentionally unavailable")
+            return self._snapshot(event, date(2026, 8, 18))
         return self._snapshot(event, date(2026, 8, 4))
 
     def build_for_execution_date(
@@ -210,14 +218,21 @@ def test_current_candidate_preserves_training_features_and_prior_opportunity_his
         datetime(2026, 8, 19, 18, 0, tzinfo=timezone.utc),
         value="999999",
     )
-    builder = _ParitySnapshotBuilder(current.event_id)
+    training_builder = _ParitySnapshotBuilder(
+        current.event_id,
+        current_historical_available=True,
+    )
+    live_builder = _ParitySnapshotBuilder(
+        current.event_id,
+        current_historical_available=False,
+    )
     as_of = datetime(2026, 8, 17, 21, 0, tzinfo=timezone.utc)
 
-    training_row = TrainingDatasetBuilder(builder).build(
+    training_row = TrainingDatasetBuilder(training_builder).build(
         (current,),
         all_events=(prior, current),
     )[0]
-    assembly = PitCandidateAssembler(builder).assemble(
+    assembly = PitCandidateAssembler(live_builder).assemble(
         (current,),
         all_events=(prior, current, future),
         as_of=as_of,

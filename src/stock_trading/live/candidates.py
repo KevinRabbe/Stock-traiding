@@ -378,7 +378,12 @@ class EventBatchPitCandidateSource:
             if company_ids
             else ()
         )
-        execution_date = self.session_resolver.execution_date(cutoff)
+        cycle_resolver = getattr(self.session_resolver, "cycle_execution_date", None)
+        execution_date = (
+            cycle_resolver(cutoff)
+            if callable(cycle_resolver)
+            else self.session_resolver.execution_date(cutoff)
+        )
         assembly = self.assembler.assemble(
             triggers,
             all_events=history,

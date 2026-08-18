@@ -38,9 +38,11 @@ class RuntimeVerification:
     @property
     def shadow_strategy_ids(self) -> tuple[str, ...]:
         return tuple(
-            item.strategy_id
-            for item in self.artifacts
-            if item.stage is StrategyStage.SHADOW and item.plugin_restored
+            sorted(
+                item.strategy_id
+                for item in self.artifacts
+                if item.stage is StrategyStage.SHADOW and item.plugin_restored
+            )
         )
 
 

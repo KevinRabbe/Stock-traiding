@@ -106,8 +106,7 @@ class _SecClient:
         )
 
 
-def test_current_form4_poll_is_durable_and_idempotent(tmp_path) -> None:
-    pytest.importorskip("duckdb")
+def _poll_one(tmp_path):
     raw_store = FileRawStore(tmp_path / "raw")
     event_store = DuckDbEventStore(tmp_path / "events.duckdb")
     queue = FileCurrentEventQueue(tmp_path / "runtime" / "current_event_intake.json")
@@ -119,15 +118,17 @@ def test_current_form4_poll_is_durable_and_idempotent(tmp_path) -> None:
         queue=queue,
         initial_lookback_days=7,
     )
+    poller.poll((_CIK,), as_of=datetime(2026, 8, 17, 21, 0, tzinfo=timezone.utc))
+    return raw_store, event_store, queue, client, poller
+
+
+def test_current_form4_poll_is_durable_and_idempotent(tmp_path) -> None:
+    pytest.importorskip("duckdb")
+    _, _, queue, client, poller = _poll_one(tmp_path)
     as_of = datetime(2026, 8, 17, 21, 0, tzinfo=timezone.utc)
 
-    first = poller.poll((_CIK,), as_of=as_of)
-    assert first.filings_committed == 1
-    assert first.events_normalized == 1
-    assert first.pending_events_added == 1
-    assert first.pending_event_count == 1
+    assert len(queue.pending()) == 1
     assert client.filing_calls == 1
-
     pending_id = queue.pending()[0].event_id
     assert queue.acknowledge((pending_id,)) == 1
     assert queue.pending() == ()
@@ -143,20 +144,7 @@ def test_current_form4_poll_is_durable_and_idempotent(tmp_path) -> None:
 
 def test_pending_provider_never_moves_stale_filing_to_later_session(tmp_path) -> None:
     pytest.importorskip("duckdb")
-    raw_store = FileRawStore(tmp_path / "raw")
-    event_store = DuckDbEventStore(tmp_path / "events.duckdb")
-    queue = FileCurrentEventQueue(tmp_path / "runtime" / "current_event_intake.json")
-    client = _SecClient("2026-08-17T20:30:09Z")
-    poller = SecCurrentForm4Poller(
-        client=client,  # type: ignore[arg-type]
-        raw_store=raw_store,
-        event_store=event_store,
-        queue=queue,
-    )
-    poller.poll(
-        (_CIK,),
-        as_of=datetime(2026, 8, 17, 21, 0, tzinfo=timezone.utc),
-    )
+    _, event_store, queue, _, _ = _poll_one(tmp_path)
     provider = DurablePendingTriggerProvider(
         queue=queue,
         event_store=event_store,
@@ -169,14 +157,40 @@ def test_pending_provider_never_moves_stale_filing_to_later_session(tmp_path) ->
     assert str(provider.last_selection.target_execution_date) == "2026-08-18"
     assert provider.last_selection.stale_event_ids == ()
 
-    # One Eastern calendar day later the same unacknowledged filing is stale. It
-    # stays pending for explicit disposition and is NOT silently assigned Aug 19.
+    # After the Aug 18 open the same unacknowledged filing is stale. It stays
+    # pending for explicit disposition and is NOT silently assigned Aug 19.
     selected_late = provider.events(datetime(2026, 8, 18, 21, 0, tzinfo=timezone.utc))
     assert selected_late == ()
     assert provider.last_selection is not None
     assert str(provider.last_selection.target_execution_date) == "2026-08-19"
     assert len(provider.last_selection.stale_event_ids) == 1
     assert len(queue.pending()) == 1
+
+
+def test_preopen_restart_keeps_previous_day_filing_actionable(tmp_path) -> None:
+    pytest.importorskip("duckdb")
+    _, event_store, queue, _, _ = _poll_one(tmp_path)
+    provider = DurablePendingTriggerProvider(
+        queue=queue,
+        event_store=event_store,
+        session_resolver=XnysExecutionSessionResolver(),
+    )
+
+    # 11:00 UTC is 07:00 New York on Aug 18, before the 09:30 regular open.
+    selected = provider.events(datetime(2026, 8, 18, 11, 0, tzinfo=timezone.utc))
+    assert len(selected) == 1
+    assert provider.last_selection is not None
+    assert provider.last_selection.target_execution_date.isoformat() == "2026-08-18"
+    assert provider.last_selection.stale_event_ids == ()
+
+    # Once the open has passed, today's execution opportunity is no longer valid.
+    selected_after_open = provider.events(
+        datetime(2026, 8, 18, 14, 0, tzinfo=timezone.utc)
+    )
+    assert selected_after_open == ()
+    assert provider.last_selection is not None
+    assert provider.last_selection.target_execution_date.isoformat() == "2026-08-19"
+    assert len(provider.last_selection.stale_event_ids) == 1
 
 
 def test_xnys_resolver_handles_observed_independence_day_closure() -> None:

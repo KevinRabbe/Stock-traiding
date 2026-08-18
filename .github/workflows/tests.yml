@@ -46,3 +46,4 @@ jobs:
           python -W error -m stock_trading.live.recover_sec_form4_quarantine --help
           python -W error -m stock_trading.live.run_current_paper_shadow --help
           python -W error -m stock_trading.live.diagnose_current_receipt --help
+          python -W error -m stock_trading.live.run_current_pipeline --help

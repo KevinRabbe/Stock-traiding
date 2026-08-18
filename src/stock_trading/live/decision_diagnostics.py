@@ -366,13 +366,17 @@ class FileStrategyDecisionDiagnosticStore:
 def diagnostics_payload(
     diagnostics: Iterable[StrategyDecisionDiagnostics],
 ) -> list[dict]:
-    result: list[dict] = []
-    for strategy in diagnostics:
-        item = asdict(strategy)
-        for decision in item["decisions"]:
-            decision["execution_date"] = decision["execution_date"].isoformat()
-        result.append(item)
-    return result
+    return [_json_compatible(asdict(strategy)) for strategy in diagnostics]
+
+
+def _json_compatible(value):
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _json_compatible(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_json_compatible(item) for item in value]
+    return value
 
 
 def validate_diagnostic_counts(

@@ -33,6 +33,11 @@ from .current_cycle_receipt import (
     reconcile_completed_receipts,
 )
 from .current_market import sync_pending_current_market
+from .decision_diagnostics import (
+    FileStrategyDecisionDiagnosticStore,
+    diagnose_registry,
+    validate_diagnostic_counts,
+)
 from .event_intake import DurablePendingTriggerProvider, FileCurrentEventQueue
 from .pending_disposition import (
     FileStaleTriggerDispositionStore,
@@ -89,8 +94,8 @@ def run_current_paper_shadow_cycle(
 
     The function has PAPER authority only. It never promotes strategies and never
     acknowledges actionable event IDs until all strategy evaluation, PAPER broker
-    state, engine/shadow audits, mutable calibration overlays and the deterministic
-    batch receipt are durable.
+    state, engine/shadow audits, decision diagnostics, mutable calibration overlays
+    and the deterministic batch receipt are durable.
     """
 
     data_root = Path(data_root)
@@ -281,6 +286,11 @@ def run_current_paper_shadow_cycle(
     state_store = FileRuntimeStrategyStateStore(runtime_dir / "strategy_state")
     restored_state_ids = state_store.restore_registry(loaded.registry)
 
+    # Explain the exact pre-decision model state without updating rolling calibration.
+    # The real strategy path below remains authoritative; emitted counts are compared
+    # before the diagnostic audit is allowed to become durable.
+    decision_diagnostics = diagnose_registry(loaded.registry, candidates)
+
     opportunity_risk = BasicOpportunityRiskPolicy(max_expected_downside=0.06)
     portfolio_policy = FixedAllocationPortfolioPolicy(
         allocation_pct=0.02,
@@ -317,6 +327,23 @@ def run_current_paper_shadow_cycle(
         engine,
         shadow_evaluator=shadow_evaluator,
     ).run_cycle(cutoff)
+
+    validate_diagnostic_counts(
+        decision_diagnostics,
+        champion_strategy_id=result.champion.strategy_id,
+        champion_opportunity_count=result.champion.opportunity_count,
+        shadow_opportunity_counts={
+            item.strategy_id: item.opportunity_count for item in result.shadows
+        },
+    )
+    diagnostic_path = FileStrategyDecisionDiagnosticStore(
+        runtime_dir / "decision_diagnostics"
+    ).write(
+        batch_id=current_batch_id,
+        as_of=cutoff,
+        target_execution_date=selection.target_execution_date,
+        diagnostics=decision_diagnostics,
+    )
 
     shadow_observer = JsonlShadowAuditObserver(runtime_dir / "shadow_evaluations.jsonl")
     shadow_observer.record(cutoff, result.shadows)
@@ -356,6 +383,7 @@ def run_current_paper_shadow_cycle(
             "restored_strategy_ids": list(restored_state_ids),
             "saved_paths": [str(path) for path in state_paths],
         },
+        "decision_diagnostics_path": str(diagnostic_path),
         "champion": {
             "strategy_id": result.champion.strategy_id,
             "candidate_count": result.champion.candidate_count,
@@ -412,8 +440,8 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Run one current PIT batch through the persisted PAPER champion and all "
-            "SHADOW challengers, persist forward calibration/audits, then acknowledge "
-            "the actionable event IDs only after a crash-safe batch receipt exists."
+            "SHADOW challengers, persist forward calibration/decision/audit state, then "
+            "acknowledge the actionable event IDs only after a crash-safe batch receipt exists."
         )
     )
     parser.add_argument("--data-root", type=Path, default=Path("data"))

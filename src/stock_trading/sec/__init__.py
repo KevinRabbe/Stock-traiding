@@ -7,9 +7,10 @@ from .quarterly import (
     conservative_historical_public_time,
 )
 from .submissions import OwnershipFiling, SubmissionsParser, parse_sec_acceptance_time
-from .xml import Form4XmlParser
+from .xml import Form4IssuerIdentity, Form4XmlParser
 
 __all__ = [
+    "Form4IssuerIdentity",
     "Form4XmlParser",
     "OwnershipFiling",
     "QuarterlyArchiveParser",

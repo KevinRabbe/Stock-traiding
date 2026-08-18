@@ -18,6 +18,10 @@ class XnysExecutionSessionResolver:
     returns today; at/after the open (or on a non-session day) it returns the next
     session. Keeping these concepts separate prevents a restart before the bell
     from incorrectly declaring yesterday's still-actionable filing stale.
+
+    ``last_completed_session(as_of)`` is the market-data watermark. It never
+    treats an in-progress regular session as completed, so current EOD refreshes
+    cannot fabricate today's bar before the close.
     """
 
     def __init__(self) -> None:
@@ -41,6 +45,25 @@ class XnysExecutionSessionResolver:
             if cutoff < open_at:
                 return eastern_day
         return self._first_session_after(eastern_day)
+
+    def last_completed_session(self, as_of: datetime) -> date:
+        cutoff = as_utc(as_of)
+        eastern_day = decision_market_date(cutoff)
+        sessions = self._calendar.sessions_in_range(eastern_day, eastern_day)
+        if len(sessions):
+            session = sessions[0]
+            close_at = self._calendar.session_close(session).to_pydatetime()
+            if cutoff >= close_at:
+                return eastern_day
+
+        start = eastern_day - timedelta(days=14)
+        end = eastern_day - timedelta(days=1)
+        previous = self._calendar.sessions_in_range(start, end)
+        if len(previous) == 0:
+            raise RuntimeError(
+                f"XNYS calendar has no completed session in {start.isoformat()}..{end.isoformat()}"
+            )
+        return previous[-1].date()
 
     def _first_session_after(self, day: date) -> date:
         # Search strictly after day. Fourteen calendar days is much wider than

@@ -20,7 +20,8 @@ from stock_trading.execution import (
     PaperPortfolioStateProvider,
     SessionClosePaperExecutionBroker,
 )
-from stock_trading.market import CandidateSnapshotBuilder, DuckDbMarketStore
+from stock_trading.local_secrets import load_tiingo_credentials
+from stock_trading.market import CandidateSnapshotBuilder, DuckDbMarketStore, TiingoClient
 from stock_trading.positions import FixedHorizonPositionManager
 from stock_trading.storage import DuckDbEventStore
 
@@ -31,6 +32,7 @@ from .current_cycle_receipt import (
     batch_id,
     reconcile_completed_receipts,
 )
+from .current_market import sync_pending_current_market
 from .event_intake import DurablePendingTriggerProvider, FileCurrentEventQueue
 from .pending_disposition import (
     FileStaleTriggerDispositionStore,
@@ -183,6 +185,67 @@ def run_current_paper_shadow_cycle(
             "remaining_pending_count": len(queue.pending()),
         }
 
+    selected_id_set = set(selection.selected_event_ids)
+    selected_pending = tuple(
+        item
+        for item in queue.pending(as_of=cutoff)
+        if item.event_id in selected_id_set
+    )
+    if len(selected_pending) != len(selection.selected_event_ids):
+        raise RuntimeError(
+            "selected pending-event identities changed before current market synchronization"
+        )
+
+    sync_end_date = resolver.last_completed_session(cutoff)
+    credentials = load_tiingo_credentials(data_root)
+    with TiingoClient(credentials.token) as tiingo_client:
+        market_sync = sync_pending_current_market(
+            selected_pending,
+            data_root=data_root,
+            market_store=market_store,
+            benchmark_security_id=str(config["benchmark_security_id"]),
+            tiingo_client=tiingo_client,
+            sync_end_date=sync_end_date,
+        )
+    market_store.clear_read_cache()
+    market_sync_payload = {
+        "sync_end_date": market_sync.sync_end_date.isoformat(),
+        "selected_event_count": market_sync.selected_event_count,
+        "accession_count": market_sync.accession_count,
+        "company_count": market_sync.company_count,
+        "tickers": list(market_sync.tickers),
+        "metadata_refreshed": market_sync.metadata_refreshed,
+        "resolved_companies": market_sync.resolved_companies,
+        "unresolved_companies": market_sync.unresolved_companies,
+        "downloaded_price_series": market_sync.downloaded_price_series,
+        "failed_price_series": market_sync.failed_price_series,
+        "reused_price_responses": market_sync.reused_price_responses,
+        "skipped_complete_price_series": market_sync.skipped_complete_price_series,
+        "benchmark_downloaded": market_sync.benchmark_downloaded,
+        "benchmark_bars_added": market_sync.benchmark_bars_added,
+        "failures": [
+            {
+                "company_id": item.company_id,
+                "cik": item.cik,
+                "ticker": item.ticker,
+                "issuer_name": item.issuer_name,
+                "reason": item.reason,
+            }
+            for item in market_sync.failures
+        ],
+    }
+    if not market_sync.ready or market_sync.resolved_companies != market_sync.company_count:
+        reasons = "; ".join(
+            f"{item.company_id}/{item.ticker}:{item.reason}"
+            for item in market_sync.failures
+        ) or "price-series synchronization failure"
+        raise RuntimeError(
+            "current market synchronization is incomplete: "
+            f"resolved={market_sync.resolved_companies}/{market_sync.company_count}, "
+            f"failed_price_series={market_sync.failed_price_series}; {reasons}; "
+            "selected event IDs remain pending for retry"
+        )
+
     # Build and validate the actionable candidate batch before PAPER settlement or
     # strategy state can change. Every affected modeled company must produce one
     # current company/session candidate; otherwise source/market readiness is not
@@ -209,7 +272,7 @@ def run_current_paper_shadow_cycle(
         raise RuntimeError("candidate assembly did not consume the complete selected trigger batch")
     if assembly.candidate_count != assembly.affected_company_count:
         raise RuntimeError(
-            "current market/security data is not ready for every selected company: "
+            "current market/security data is not ready for every selected company after sync: "
             f"affected={assembly.affected_company_count} candidates={assembly.candidate_count}; "
             "selected event IDs remain pending for retry"
         )
@@ -281,6 +344,7 @@ def run_current_paper_shadow_cycle(
         **base_payload,
         "status": "completed",
         "batch_id": current_batch_id,
+        "current_market_sync": market_sync_payload,
         "candidate_assembly": {
             "trigger_event_count": assembly.trigger_event_count,
             "affected_company_count": assembly.affected_company_count,

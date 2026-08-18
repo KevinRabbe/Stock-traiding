@@ -149,9 +149,22 @@ def main() -> None:
                 "poll": {
                     "submissions_fetched": poll_result.submissions_fetched,
                     "filings_committed": poll_result.filings_committed,
+                    "filings_quarantined": poll_result.filings_quarantined,
                     "events_normalized": poll_result.events_normalized,
                     "pending_events_added": poll_result.pending_events_added,
                     "pending_event_count": poll_result.pending_event_count,
+                    "quarantine_count": poll_result.quarantine_count,
+                    "quarantined_filings": [
+                        {
+                            "accepted_at": item.accepted_at.isoformat(),
+                            "cik": item.cik,
+                            "accession_number": item.accession_number,
+                            "raw_artifact_id": item.raw_artifact_id,
+                            "error_type": item.error_type,
+                            "error_message": item.error_message,
+                        }
+                        for item in poll_result.quarantined_filings
+                    ],
                 },
                 "pending_session_selection": {
                     "target_execution_date": str(selection.target_execution_date),

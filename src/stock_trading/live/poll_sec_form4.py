@@ -6,6 +6,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+from stock_trading.core import as_utc
 from stock_trading.sec import SecClient
 from stock_trading.storage import DuckDbEventStore, FileRawStore
 
@@ -80,6 +81,108 @@ def _parse_as_of(value: str | None) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def poll_current_form4(
+    *,
+    data_root: str | Path = "data",
+    experiment_dir: str | Path = "data/experiments/lightgbm_holdout_250_v2",
+    runtime_dir: str | Path = "data/runtime",
+    initial_lookback_days: int = 7,
+    max_companies: int | None = None,
+    as_of: datetime | None = None,
+    user_agent: str | None = None,
+) -> dict:
+    """Poll modeled-company Form 4 intake and return durable queue diagnostics.
+
+    This operation has no trading authority and never acknowledges pending events.
+    It is the reusable implementation behind both the standalone polling CLI and
+    the guarded poll→PAPER/SHADOW orchestration command.
+    """
+
+    if initial_lookback_days <= 0:
+        raise ValueError("initial_lookback_days must be > 0")
+    if max_companies is not None and max_companies <= 0:
+        raise ValueError("max_companies must be > 0")
+
+    data_root = Path(data_root)
+    experiment_dir = Path(experiment_dir)
+    runtime_dir = Path(runtime_dir)
+    cutoff = as_utc(as_of or datetime.now(timezone.utc))
+    resolved_user_agent = (user_agent or os.environ.get("SEC_USER_AGENT", "")).strip()
+    if not resolved_user_agent:
+        raise RuntimeError(
+            "SEC_USER_AGENT is required and must identify the application/contact"
+        )
+
+    # Resolve the exchange calendar before any current-source mutation. A missing
+    # runtime dependency or invalid calendar must fail before SEC fetches, raw
+    # writes, event writes, watermark changes, or quarantine changes begin.
+    resolver = XnysExecutionSessionResolver()
+
+    ciks = _modeled_ciks(
+        data_root / "manifests" / "sec_companies.jsonl",
+        experiment_dir / "training_rows.jsonl",
+    )
+    if max_companies is not None:
+        ciks = ciks[:max_companies]
+
+    raw_store = FileRawStore(data_root / "raw")
+    event_store = DuckDbEventStore(data_root / "normalized" / "events.duckdb")
+    queue = FileCurrentEventQueue(runtime_dir / "current_event_intake.json")
+    with SecClient(resolved_user_agent) as client:
+        poll_result = SecCurrentForm4Poller(
+            client=client,
+            raw_store=raw_store,
+            event_store=event_store,
+            queue=queue,
+            initial_lookback_days=initial_lookback_days,
+        ).poll(ciks, as_of=cutoff)
+
+    provider = DurablePendingTriggerProvider(
+        queue=queue,
+        event_store=event_store,
+        session_resolver=resolver,
+    )
+    selected = provider.events(cutoff)
+    selection = provider.last_selection
+    if selection is None:
+        raise RuntimeError("pending trigger provider did not produce selection diagnostics")
+
+    return {
+        "as_of": cutoff.isoformat(),
+        "modeled_company_count": len(ciks),
+        "poll": {
+            "submissions_fetched": poll_result.submissions_fetched,
+            "filings_committed": poll_result.filings_committed,
+            "filings_quarantined": poll_result.filings_quarantined,
+            "events_normalized": poll_result.events_normalized,
+            "pending_events_added": poll_result.pending_events_added,
+            "pending_event_count": poll_result.pending_event_count,
+            "quarantine_count": poll_result.quarantine_count,
+            "quarantined_filings": [
+                {
+                    "accepted_at": item.accepted_at.isoformat(),
+                    "cik": item.cik,
+                    "accession_number": item.accession_number,
+                    "raw_artifact_id": item.raw_artifact_id,
+                    "error_type": item.error_type,
+                    "error_message": item.error_message,
+                }
+                for item in poll_result.quarantined_filings
+            ],
+        },
+        "pending_session_selection": {
+            "target_execution_date": str(selection.target_execution_date),
+            "selected_event_count": len(selected),
+            "selected_event_ids": list(selection.selected_event_ids),
+            "stale_event_count": len(selection.stale_event_ids),
+            "stale_event_ids": list(selection.stale_event_ids),
+            "future_event_count": len(selection.future_event_ids),
+            "future_event_ids": list(selection.future_event_ids),
+            "acknowledged": False,
+        },
+    }
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -102,89 +205,15 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _parser().parse_args()
-    if args.max_companies is not None and args.max_companies <= 0:
-        raise ValueError("--max-companies must be > 0")
-    as_of = _parse_as_of(args.as_of)
-    user_agent = os.environ.get("SEC_USER_AGENT", "").strip()
-    if not user_agent:
-        raise RuntimeError(
-            "SEC_USER_AGENT is required and must identify the application/contact"
-        )
-
-    # Resolve the exchange calendar before any current-source mutation. A missing
-    # runtime dependency or invalid calendar must fail before SEC fetches, raw
-    # writes, event writes, watermark changes, or quarantine changes begin.
-    resolver = XnysExecutionSessionResolver()
-
-    ciks = _modeled_ciks(
-        args.data_root / "manifests" / "sec_companies.jsonl",
-        args.experiment_dir / "training_rows.jsonl",
+    result = poll_current_form4(
+        data_root=args.data_root,
+        experiment_dir=args.experiment_dir,
+        runtime_dir=args.runtime_dir,
+        initial_lookback_days=args.initial_lookback_days,
+        max_companies=args.max_companies,
+        as_of=_parse_as_of(args.as_of),
     )
-    if args.max_companies is not None:
-        ciks = ciks[: args.max_companies]
-
-    raw_store = FileRawStore(args.data_root / "raw")
-    event_store = DuckDbEventStore(args.data_root / "normalized" / "events.duckdb")
-    queue = FileCurrentEventQueue(args.runtime_dir / "current_event_intake.json")
-    with SecClient(user_agent) as client:
-        poll_result = SecCurrentForm4Poller(
-            client=client,
-            raw_store=raw_store,
-            event_store=event_store,
-            queue=queue,
-            initial_lookback_days=args.initial_lookback_days,
-        ).poll(ciks, as_of=as_of)
-
-    provider = DurablePendingTriggerProvider(
-        queue=queue,
-        event_store=event_store,
-        session_resolver=resolver,
-    )
-    selected = provider.events(as_of)
-    selection = provider.last_selection
-    if selection is None:
-        raise RuntimeError("pending trigger provider did not produce selection diagnostics")
-
-    print(
-        json.dumps(
-            {
-                "as_of": as_of.isoformat(),
-                "modeled_company_count": len(ciks),
-                "poll": {
-                    "submissions_fetched": poll_result.submissions_fetched,
-                    "filings_committed": poll_result.filings_committed,
-                    "filings_quarantined": poll_result.filings_quarantined,
-                    "events_normalized": poll_result.events_normalized,
-                    "pending_events_added": poll_result.pending_events_added,
-                    "pending_event_count": poll_result.pending_event_count,
-                    "quarantine_count": poll_result.quarantine_count,
-                    "quarantined_filings": [
-                        {
-                            "accepted_at": item.accepted_at.isoformat(),
-                            "cik": item.cik,
-                            "accession_number": item.accession_number,
-                            "raw_artifact_id": item.raw_artifact_id,
-                            "error_type": item.error_type,
-                            "error_message": item.error_message,
-                        }
-                        for item in poll_result.quarantined_filings
-                    ],
-                },
-                "pending_session_selection": {
-                    "target_execution_date": str(selection.target_execution_date),
-                    "selected_event_count": len(selected),
-                    "selected_event_ids": list(selection.selected_event_ids),
-                    "stale_event_count": len(selection.stale_event_ids),
-                    "stale_event_ids": list(selection.stale_event_ids),
-                    "future_event_count": len(selection.future_event_ids),
-                    "future_event_ids": list(selection.future_event_ids),
-                    "acknowledged": False,
-                },
-            },
-            indent=2,
-            sort_keys=True,
-        )
-    )
+    print(json.dumps(result, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":

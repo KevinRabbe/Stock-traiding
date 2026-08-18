@@ -1,0 +1,372 @@
+from __future__ import annotations
+
+import argparse
+import json
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+from stock_trading.core import as_utc
+from stock_trading.engine import (
+    BasicOpportunityRiskPolicy,
+    FixedAllocationPortfolioPolicy,
+    JsonlEngineAuditObserver,
+    PassThroughPortfolioRiskPolicy,
+    TradingEngine,
+)
+from stock_trading.execution import (
+    DuckDbClosePriceProvider,
+    FilePaperLedger,
+    PaperPortfolioStateProvider,
+    SessionClosePaperExecutionBroker,
+)
+from stock_trading.market import CandidateSnapshotBuilder, DuckDbMarketStore
+from stock_trading.positions import FixedHorizonPositionManager
+from stock_trading.storage import DuckDbEventStore
+
+from .candidates import EventBatchPitCandidateSource, PitCandidateAssembler
+from .current_cycle_receipt import (
+    CurrentCycleReceipt,
+    FileCurrentCycleReceiptStore,
+    batch_id,
+    reconcile_completed_receipts,
+)
+from .event_intake import DurablePendingTriggerProvider, FileCurrentEventQueue
+from .pending_disposition import (
+    FileStaleTriggerDispositionStore,
+    dispose_stale_selection,
+)
+from .runtime_state import load_persisted_shadow_registry
+from .runtime_strategy_state import FileRuntimeStrategyStateStore
+from .service import ShadowStrategyEvaluator, TradingService
+from .session_calendar import XnysExecutionSessionResolver
+from .shadow_persistence import JsonlShadowAuditObserver
+
+
+@dataclass(frozen=True, slots=True)
+class _StaticCandidateSource:
+    expected_as_of: datetime
+    values: tuple
+
+    def candidates(self, as_of: datetime):
+        if as_utc(as_of) != self.expected_as_of:
+            raise ValueError("static current candidate source used for a different cycle time")
+        return self.values
+
+
+def _parse_as_of(value: str | None) -> datetime:
+    if value is None:
+        return datetime.now(timezone.utc)
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("--as-of must include a timezone offset")
+    return parsed.astimezone(timezone.utc)
+
+
+def _load_runtime_config(runtime_dir: Path) -> dict:
+    path = runtime_dir / "paper_runtime.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid PAPER runtime config: {path}") from exc
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        raise ValueError("unsupported PAPER runtime config schema")
+    for name in ("market_db", "benchmark_security_id", "paper_ledger"):
+        if not str(payload.get(name) or "").strip():
+            raise ValueError(f"PAPER runtime config is missing {name}")
+    return payload
+
+
+def run_current_paper_shadow_cycle(
+    *,
+    data_root: str | Path = "data",
+    runtime_dir: str | Path = "data/runtime",
+    as_of: datetime | None = None,
+) -> dict:
+    """Evaluate one durable current event batch through PAPER champion + SHADOWs.
+
+    The function has PAPER authority only. It never promotes strategies and never
+    acknowledges actionable event IDs until all strategy evaluation, PAPER broker
+    state, engine/shadow audits, mutable calibration overlays and the deterministic
+    batch receipt are durable.
+    """
+
+    data_root = Path(data_root)
+    runtime_dir = Path(runtime_dir)
+    cutoff = as_utc(as_of or datetime.now(timezone.utc))
+    config = _load_runtime_config(runtime_dir)
+
+    # Preflight all session/runtime dependencies before changing queue or PAPER state.
+    resolver = XnysExecutionSessionResolver()
+    market_store = DuckDbMarketStore(Path(str(config["market_db"])))
+    market_store.enable_read_cache(max_series=16)
+    event_store = DuckDbEventStore(data_root / "normalized" / "events.duckdb")
+    queue = FileCurrentEventQueue(runtime_dir / "current_event_intake.json")
+    receipt_store = FileCurrentCycleReceiptStore(
+        runtime_dir / "current_cycle_receipts"
+    )
+    receipt_reconciliation = reconcile_completed_receipts(queue, receipt_store)
+
+    provider = DurablePendingTriggerProvider(
+        queue=queue,
+        event_store=event_store,
+        session_resolver=resolver,
+    )
+    selected_events = provider.events(cutoff)
+    selection = provider.last_selection
+    if selection is None:
+        raise RuntimeError("pending trigger provider did not produce selection diagnostics")
+
+    stale_result = dispose_stale_selection(
+        queue=queue,
+        store=FileStaleTriggerDispositionStore(
+            runtime_dir / "stale_trigger_dispositions.json"
+        ),
+        selection=selection,
+        session_resolver=resolver,
+        disposed_at=cutoff,
+    )
+
+    base_payload = {
+        "as_of": cutoff.isoformat(),
+        "target_execution_date": selection.target_execution_date.isoformat(),
+        "receipt_reconciliation": {
+            "receipt_count": receipt_reconciliation.receipt_count,
+            "matched_receipt_count": receipt_reconciliation.matched_receipt_count,
+            "acknowledged_pending_event_count": (
+                receipt_reconciliation.acknowledged_pending_event_count
+            ),
+            "matched_batch_ids": list(receipt_reconciliation.matched_batch_ids),
+        },
+        "stale_disposition": {
+            "selected_count": stale_result.selected_count,
+            "recorded_count": stale_result.recorded_count,
+            "removed_from_pending": stale_result.removed_from_pending,
+            "total_disposition_count": stale_result.total_disposition_count,
+        },
+        "selected_event_count": len(selected_events),
+        "selected_event_ids": list(selection.selected_event_ids),
+        "future_event_count": len(selection.future_event_ids),
+    }
+    if not selected_events:
+        return {
+            **base_payload,
+            "status": "no_actionable_batch",
+            "acknowledged_selected_count": 0,
+            "remaining_pending_count": len(queue.pending()),
+        }
+
+    current_batch_id = batch_id(
+        selection.target_execution_date,
+        tuple(selection.selected_event_ids),
+    )
+    existing_receipt = receipt_store.load(current_batch_id)
+    if existing_receipt is not None:
+        if (
+            existing_receipt.target_execution_date != selection.target_execution_date
+            or existing_receipt.selected_event_ids != tuple(selection.selected_event_ids)
+        ):
+            raise ValueError("current batch receipt does not match pending event selection")
+        acknowledged = queue.acknowledge(selection.selected_event_ids)
+        return {
+            **base_payload,
+            "status": "completed_from_existing_receipt",
+            "batch_id": current_batch_id,
+            "receipt_path": str(
+                runtime_dir / "current_cycle_receipts" / f"{current_batch_id}.json"
+            ),
+            "candidate_count": len(existing_receipt.candidate_ids),
+            "candidate_ids": list(existing_receipt.candidate_ids),
+            "champion_strategy_id": existing_receipt.champion_strategy_id,
+            "shadow_strategy_ids": list(existing_receipt.shadow_strategy_ids),
+            "acknowledged_selected_count": acknowledged,
+            "remaining_pending_count": len(queue.pending()),
+        }
+
+    # Build and validate the actionable candidate batch before PAPER settlement or
+    # strategy state can change. Every affected modeled company must produce one
+    # current company/session candidate; otherwise source/market readiness is not
+    # good enough to consume the public event batch.
+    snapshot_builder = CandidateSnapshotBuilder(
+        market_store,
+        benchmark_security_id=str(config["benchmark_security_id"]),
+    )
+    candidate_source = EventBatchPitCandidateSource(
+        event_store=event_store,
+        assembler=PitCandidateAssembler(snapshot_builder),
+        trigger_provider=provider,
+        session_resolver=resolver,
+    )
+    candidates = candidate_source.candidates(cutoff)
+    assembly = candidate_source.last_assembly
+    if assembly is None:
+        raise RuntimeError("current PIT candidate source produced no assembly diagnostics")
+    if assembly.execution_date != selection.target_execution_date:
+        raise RuntimeError(
+            "candidate execution session differs from pending-event target session"
+        )
+    if assembly.trigger_event_count != len(selection.selected_event_ids):
+        raise RuntimeError("candidate assembly did not consume the complete selected trigger batch")
+    if assembly.candidate_count != assembly.affected_company_count:
+        raise RuntimeError(
+            "current market/security data is not ready for every selected company: "
+            f"affected={assembly.affected_company_count} candidates={assembly.candidate_count}; "
+            "selected event IDs remain pending for retry"
+        )
+
+    loaded = load_persisted_shadow_registry(runtime_dir=runtime_dir)
+    state_store = FileRuntimeStrategyStateStore(runtime_dir / "strategy_state")
+    restored_state_ids = state_store.restore_registry(loaded.registry)
+
+    opportunity_risk = BasicOpportunityRiskPolicy(max_expected_downside=0.06)
+    portfolio_policy = FixedAllocationPortfolioPolicy(
+        allocation_pct=0.02,
+        max_open_positions=15,
+        max_gross_exposure_pct=0.30,
+        one_position_per_company=True,
+    )
+    portfolio_risk = PassThroughPortfolioRiskPolicy()
+    price_provider = DuckDbClosePriceProvider(market_store)
+    ledger = FilePaperLedger(Path(str(config["paper_ledger"])), starting_cash=10_000.0)
+    broker = SessionClosePaperExecutionBroker(
+        ledger,
+        price_provider,
+        per_side_cost_bps=10.0,
+    )
+    engine = TradingEngine(
+        candidate_source=_StaticCandidateSource(cutoff, candidates),
+        strategy_provider=loaded.registry,
+        opportunity_risk=opportunity_risk,
+        portfolio_policy=portfolio_policy,
+        portfolio_risk=portfolio_risk,
+        position_manager=FixedHorizonPositionManager(market_store),
+        state_provider=PaperPortfolioStateProvider(ledger, price_provider),
+        broker=broker,
+        observer=JsonlEngineAuditObserver(runtime_dir / "paper_engine_cycles.jsonl"),
+    )
+    shadow_evaluator = ShadowStrategyEvaluator(
+        loaded.registry,
+        opportunity_risk=opportunity_risk,
+        portfolio_policy=portfolio_policy,
+        portfolio_risk=portfolio_risk,
+    )
+    result = TradingService(
+        engine,
+        shadow_evaluator=shadow_evaluator,
+    ).run_cycle(cutoff)
+
+    shadow_observer = JsonlShadowAuditObserver(runtime_dir / "shadow_evaluations.jsonl")
+    shadow_observer.record(cutoff, result.shadows)
+
+    state_paths = state_store.save_registry(
+        loaded.registry,
+        completed_batch_id=current_batch_id,
+    )
+    receipt = CurrentCycleReceipt(
+        batch_id=current_batch_id,
+        completed_at=datetime.now(timezone.utc),
+        target_execution_date=selection.target_execution_date,
+        selected_event_ids=tuple(selection.selected_event_ids),
+        candidate_ids=tuple(candidate.candidate_id for candidate in candidates),
+        champion_strategy_id=result.champion.strategy_id,
+        champion_entry_order_ids=tuple(
+            order.order_id for order in result.champion.entry_orders
+        ),
+        shadow_strategy_ids=tuple(item.strategy_id for item in result.shadows),
+    )
+    receipt_path = receipt_store.write(receipt)
+    acknowledged = queue.acknowledge(selection.selected_event_ids)
+
+    return {
+        **base_payload,
+        "status": "completed",
+        "batch_id": current_batch_id,
+        "candidate_assembly": {
+            "trigger_event_count": assembly.trigger_event_count,
+            "affected_company_count": assembly.affected_company_count,
+            "context_opportunity_count": assembly.context_opportunity_count,
+            "candidate_count": assembly.candidate_count,
+            "candidate_ids": [candidate.candidate_id for candidate in candidates],
+        },
+        "runtime_strategy_state": {
+            "restored_strategy_ids": list(restored_state_ids),
+            "saved_paths": [str(path) for path in state_paths],
+        },
+        "champion": {
+            "strategy_id": result.champion.strategy_id,
+            "candidate_count": result.champion.candidate_count,
+            "opportunity_count": result.champion.opportunity_count,
+            "eligible_opportunity_count": result.champion.eligible_opportunity_count,
+            "allocation_count": result.champion.allocation_count,
+            "entry_orders": [
+                {
+                    "order_id": order.order_id,
+                    "candidate_id": order.candidate_id,
+                    "company_id": order.company_id,
+                    "security_id": order.security_id,
+                    "execute_on": (
+                        order.execute_on.isoformat() if order.execute_on else None
+                    ),
+                    "horizon_sessions": order.horizon_sessions,
+                    "allocation_pct": order.allocation_pct,
+                }
+                for order in result.champion.entry_orders
+            ],
+            "executions": [
+                {
+                    "order_id": report.order_id,
+                    "status": report.status.value,
+                    "accepted": report.accepted,
+                    "fill_price": report.fill_price,
+                    "message": report.message,
+                }
+                for report in result.champion.executions
+            ],
+            "settlement_count": len(result.champion.settlements),
+        },
+        "shadows": [
+            {
+                "strategy_id": item.strategy_id,
+                "candidate_count": item.candidate_count,
+                "opportunity_count": item.opportunity_count,
+                "eligible_opportunity_count": item.eligible_opportunity_count,
+                "allocation_count": item.allocation_count,
+                "requested_exposure_pct": item.requested_exposure_pct,
+                "top_score": item.top_score,
+                "horizon_counts": [list(value) for value in item.horizon_counts],
+                "selected_candidate_ids": list(item.selected_candidate_ids),
+            }
+            for item in result.shadows
+        ],
+        "receipt_path": str(receipt_path),
+        "acknowledged_selected_count": acknowledged,
+        "remaining_pending_count": len(queue.pending()),
+    }
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run one current PIT batch through the persisted PAPER champion and all "
+            "SHADOW challengers, persist forward calibration/audits, then acknowledge "
+            "the actionable event IDs only after a crash-safe batch receipt exists."
+        )
+    )
+    parser.add_argument("--data-root", type=Path, default=Path("data"))
+    parser.add_argument("--runtime-dir", type=Path, default=Path("data/runtime"))
+    parser.add_argument("--as-of")
+    return parser
+
+
+def main() -> None:
+    args = _parser().parse_args()
+    result = run_current_paper_shadow_cycle(
+        data_root=args.data_root,
+        runtime_dir=args.runtime_dir,
+        as_of=_parse_as_of(args.as_of),
+    )
+    print(json.dumps(result, indent=2, sort_keys=True, allow_nan=False))
+
+
+if __name__ == "__main__":
+    main()

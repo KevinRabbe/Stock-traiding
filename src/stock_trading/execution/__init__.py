@@ -6,6 +6,7 @@ from .paper import (
     PaperPositionState,
 )
 from .prices import DuckDbClosePriceProvider, FixedPriceProvider, PriceProvider
+from .session_paper import SessionClosePaperExecutionBroker
 
 __all__ = [
     "DuckDbClosePriceProvider",
@@ -16,4 +17,5 @@ __all__ = [
     "PaperPortfolioStateProvider",
     "PaperPositionState",
     "PriceProvider",
+    "SessionClosePaperExecutionBroker",
 ]

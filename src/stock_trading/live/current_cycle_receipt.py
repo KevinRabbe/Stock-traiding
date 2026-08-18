@@ -33,6 +33,14 @@ class CurrentCycleReceipt:
             raise ValueError("current cycle receipt contains duplicate candidate IDs")
 
 
+@dataclass(frozen=True, slots=True)
+class ReceiptReconciliationResult:
+    receipt_count: int
+    matched_receipt_count: int
+    acknowledged_pending_event_count: int
+    matched_batch_ids: tuple[str, ...]
+
+
 class FileCurrentCycleReceiptStore:
     """One immutable-style atomic receipt per evaluated actionable event batch."""
 
@@ -71,6 +79,20 @@ class FileCurrentCycleReceiptStore:
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"invalid current cycle receipt: {path}") from exc
 
+    def load_all(self) -> tuple[CurrentCycleReceipt, ...]:
+        if not self.root.exists():
+            return ()
+        receipts: list[CurrentCycleReceipt] = []
+        for path in sorted(self.root.glob("batch_*.json")):
+            receipt = self.load(path.stem)
+            if receipt is None:
+                raise RuntimeError(f"current cycle receipt disappeared during scan: {path}")
+            receipts.append(receipt)
+        ids = [item.batch_id for item in receipts]
+        if len(ids) != len(set(ids)):
+            raise ValueError("duplicate current cycle batch receipts")
+        return tuple(receipts)
+
     def write(self, receipt: CurrentCycleReceipt) -> Path:
         expected = batch_id(
             receipt.target_execution_date,
@@ -101,6 +123,43 @@ class FileCurrentCycleReceiptStore:
         if not batch_id_value.startswith("batch_"):
             raise ValueError("invalid current cycle batch_id")
         return self.root / f"{batch_id_value}.json"
+
+
+def reconcile_completed_receipts(queue, store: FileCurrentCycleReceiptStore) -> ReceiptReconciliationResult:
+    """Finish queue acknowledgement for batches whose durable receipt already exists.
+
+    Reconciliation intentionally runs before exchange-session classification. This
+    prevents a crash after receipt publication but before queue acknowledgement from
+    causing an already-evaluated event to be mislabeled as stale after the intended
+    market open has passed.
+    """
+
+    receipts = store.load_all()
+    pending_ids = {item.event_id for item in queue.pending()}
+    matched: list[str] = []
+    acknowledged = 0
+    for receipt in receipts:
+        outstanding = tuple(
+            event_id
+            for event_id in receipt.selected_event_ids
+            if event_id in pending_ids
+        )
+        if not outstanding:
+            continue
+        removed = queue.acknowledge(outstanding)
+        if removed != len(outstanding):
+            raise RuntimeError(
+                f"completed receipt acknowledgement was not atomic for {receipt.batch_id}"
+            )
+        acknowledged += removed
+        matched.append(receipt.batch_id)
+        pending_ids.difference_update(outstanding)
+    return ReceiptReconciliationResult(
+        receipt_count=len(receipts),
+        matched_receipt_count=len(matched),
+        acknowledged_pending_event_count=acknowledged,
+        matched_batch_ids=tuple(matched),
+    )
 
 
 def batch_id(target_execution_date: date, event_ids: tuple[str, ...]) -> str:

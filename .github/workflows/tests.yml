@@ -39,3 +39,4 @@ jobs:
           python -W error -m stock_trading.experiments.lightgbm_strategy_factory_executable_maturity --help
           python -W error -m stock_trading.experiments.lightgbm_strategy_qualify_executable_maturity --help
           python -W error -m stock_trading.experiments.lightgbm_strategy_freeze_executable_maturity --help
+          python -W error -m stock_trading.experiments.lightgbm_strategy_freeze_executable_maturity_compat --help

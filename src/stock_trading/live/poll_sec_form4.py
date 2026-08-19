@@ -15,6 +15,10 @@ from .event_intake import (
     FileCurrentEventQueue,
     SecCurrentForm4Poller,
 )
+from .finalized_form4 import (
+    FinalizedAwareSubmissionsParser,
+    load_finalized_form4_index,
+)
 from .session_calendar import XnysExecutionSessionResolver
 
 
@@ -96,6 +100,12 @@ def poll_current_form4(
     This operation has no trading authority and never acknowledges pending events.
     It is the reusable implementation behind both the standalone polling CLI and
     the guarded poll→PAPER/SHADOW orchestration command.
+
+    Filing watermarks remain the fast incremental boundary. In addition, accessions
+    already finalized by a durable current-cycle receipt or explicit stale audit are
+    filtered after parsing the unchanged raw SEC submissions response. This makes
+    accession identity the terminal idempotency boundary even if a mutable SEC
+    submissions document repeats an old filing or cursor metadata changes later.
     """
 
     if initial_lookback_days <= 0:
@@ -128,14 +138,23 @@ def poll_current_form4(
     raw_store = FileRawStore(data_root / "raw")
     event_store = DuckDbEventStore(data_root / "normalized" / "events.duckdb")
     queue = FileCurrentEventQueue(runtime_dir / "current_event_intake.json")
+    finalized = load_finalized_form4_index(
+        runtime_dir=runtime_dir,
+        event_store=event_store,
+    )
+    finalized_parser = FinalizedAwareSubmissionsParser(finalized.accessions)
     with SecClient(resolved_user_agent) as client:
-        poll_result = SecCurrentForm4Poller(
+        poller = SecCurrentForm4Poller(
             client=client,
             raw_store=raw_store,
             event_store=event_store,
             queue=queue,
             initial_lookback_days=initial_lookback_days,
-        ).poll(ciks, as_of=cutoff)
+        )
+        # Preserve the unmodified raw submissions artifact in storage. Only the
+        # parsed filing stream is filtered against durable terminal accession IDs.
+        poller.submissions_parser = finalized_parser
+        poll_result = poller.poll(ciks, as_of=cutoff)
 
     provider = DurablePendingTriggerProvider(
         queue=queue,
@@ -158,6 +177,11 @@ def poll_current_form4(
             "pending_events_added": poll_result.pending_events_added,
             "pending_event_count": poll_result.pending_event_count,
             "quarantine_count": poll_result.quarantine_count,
+            "finalized_accession_count": len(finalized.accessions),
+            "finalized_receipt_event_count": finalized.receipt_event_count,
+            "finalized_receipt_accession_count": finalized.receipt_accession_count,
+            "finalized_stale_accession_count": finalized.stale_accession_count,
+            "suppressed_finalized_filing_replays": finalized_parser.suppressed_replays,
             "quarantined_filings": [
                 {
                     "accepted_at": item.accepted_at.isoformat(),

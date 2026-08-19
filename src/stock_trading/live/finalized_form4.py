@@ -16,6 +16,7 @@ class FinalizedForm4Index:
     receipt_event_count: int
     receipt_accession_count: int
     stale_accession_count: int
+    partial_accession_count: int = 0
 
 
 class FinalizedAwareSubmissionsParser:
@@ -62,11 +63,15 @@ def load_finalized_form4_index(
 ) -> FinalizedForm4Index:
     """Build the durable finalized-accession set from receipts + stale audits.
 
-    Receipts contain event IDs, so source accession identity is resolved directly
-    from the normalized event store with a targeted DuckDB query. Stale dispositions
-    already persist accession identity explicitly. Missing receipt events fail closed:
-    a completed receipt whose source event disappeared must never silently weaken the
-    idempotency boundary.
+    Receipts and stale dispositions are event-level authorities. An accession is
+    terminal only when every normalized SEC event belonging to it is covered by one
+    of those durable finalization records. This prevents one completed transaction
+    from suppressing unfinished sibling transactions from the same Form 4 filing.
+
+    Stale-only accessions with no normalized rows retain the previous behavior. That
+    state is not produced by the live pipeline (stale records originate from the
+    normalized pending queue), but preserving it keeps historical audit fixtures
+    readable while completeness is enforced whenever normalized rows exist.
     """
 
     runtime_dir = Path(runtime_dir)
@@ -92,12 +97,22 @@ def load_finalized_form4_index(
         for item in stale_records
         if item.accession_number.strip()
     }
+    finalized_event_ids = frozenset(receipt_event_ids) | frozenset(
+        item.event_id for item in stale_records
+    )
+    accessions, partial_accession_count = _fully_finalized_accessions(
+        event_store,
+        candidate_accessions=receipt_accessions | stale_accessions,
+        finalized_event_ids=finalized_event_ids,
+        stale_accessions=stale_accessions,
+    )
 
     return FinalizedForm4Index(
-        accessions=frozenset(receipt_accessions | stale_accessions),
+        accessions=frozenset(accessions),
         receipt_event_count=len(receipt_event_ids),
         receipt_accession_count=len(receipt_accessions),
         stale_accession_count=len(stale_accessions),
+        partial_accession_count=partial_accession_count,
     )
 
 
@@ -136,6 +151,54 @@ def _accessions_for_event_ids(
             f"{missing[:5]}"
         )
     return accessions
+
+
+def _fully_finalized_accessions(
+    event_store: DuckDbEventStore,
+    *,
+    candidate_accessions: set[str],
+    finalized_event_ids: frozenset[str],
+    stale_accessions: set[str],
+) -> tuple[set[str], int]:
+    if not candidate_accessions:
+        return set(), 0
+
+    finalized: set[str] = set()
+    partial_count = 0
+    with event_store._connect() as connection:  # noqa: SLF001 - same storage boundary
+        for accession in sorted(candidate_accessions):
+            rows = connection.execute(
+                "SELECT event_id, source_record_id FROM events "
+                "WHERE source = ? AND source_record_id LIKE ?",
+                ["sec_edgar", f"{accession}:NONDERIV_TRANS:%"],
+            ).fetchall()
+            normalized_event_ids = {str(event_id) for event_id, _ in rows}
+
+            if not normalized_event_ids:
+                if accession in stale_accessions:
+                    finalized.add(accession)
+                    continue
+                raise RuntimeError(
+                    "completed current receipt accession is missing from normalized "
+                    f"storage: {accession}"
+                )
+
+            for _, source_record_id in rows:
+                actual_accession = _accession_from_source_record_id(
+                    str(source_record_id)
+                )
+                if actual_accession != accession:
+                    raise RuntimeError(
+                        "normalized Form 4 accession query returned foreign event: "
+                        f"expected={accession} actual={actual_accession}"
+                    )
+
+            if normalized_event_ids.issubset(finalized_event_ids):
+                finalized.add(accession)
+            else:
+                partial_count += 1
+
+    return finalized, partial_count
 
 
 def _accession_from_source_record_id(source_record_id: str) -> str:

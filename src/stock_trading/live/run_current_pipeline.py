@@ -9,6 +9,7 @@ from pathlib import Path
 from stock_trading.core import as_utc
 from stock_trading.market.execution_time import decision_market_date
 
+from .forward_outcomes import refresh_forward_outcome_scorecard
 from .poll_sec_form4 import poll_current_form4
 from .run_current_paper_shadow import run_current_paper_shadow_cycle
 from .session_calendar import XnysExecutionSessionResolver
@@ -93,6 +94,10 @@ def run_current_pipeline(
     This is the preferred operational entry point. SEC intake remains non-authority;
     PAPER authority begins only after polling completes, the current XNYS target is
     re-resolved, and any same-day target retains the configured pre-open buffer.
+
+    After the authoritative cycle is durable, a separate measurement-only step
+    refreshes realized labels for prior forward decision candidates. Outcome refresh
+    can never acknowledge events, place orders, or mutate strategy calibration.
     """
 
     if minimum_preopen_buffer_minutes <= 0:
@@ -140,6 +145,7 @@ def run_current_pipeline(
             "session_guard": guard_payload,
             "poll": poll_payload,
             "cycle": None,
+            "forward_outcomes": None,
         }
 
     # Use a fresh post-poll timestamp. Never carry the poll-start timestamp into the
@@ -150,13 +156,37 @@ def run_current_pipeline(
         runtime_dir=runtime_dir,
         as_of=after_poll,
     )
+
+    # The trading cycle above is already authoritative/durable. Forward outcome
+    # refresh is intentionally downstream measurement. Return a structured error
+    # instead of turning a completed PAPER receipt into an ambiguous traceback.
+    try:
+        forward_outcomes = refresh_forward_outcome_scorecard(
+            data_root=data_root,
+            runtime_dir=runtime_dir,
+            as_of=datetime.now(timezone.utc),
+        )
+    except Exception as exc:  # measurement must not rewrite trading semantics
+        forward_outcomes = {
+            "status": "error",
+            "error_type": type(exc).__name__,
+            "error_message": str(exc),
+        }
+
+    cycle_status = str(cycle_payload.get("status", "unknown"))
+    status = (
+        cycle_status
+        if forward_outcomes.get("status") == "completed"
+        else f"{cycle_status}_with_forward_outcome_refresh_error"
+    )
     return {
-        "status": cycle_payload.get("status", "unknown"),
+        "status": status,
         "poll_started_at": poll_started_at.isoformat(),
         "post_poll_as_of": after_poll.isoformat(),
         "session_guard": guard_payload,
         "poll": poll_payload,
         "cycle": cycle_payload,
+        "forward_outcomes": forward_outcomes,
     }
 
 
@@ -164,7 +194,8 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Poll current SEC Form 4 filings and, only after re-validating the XNYS "
-            "execution window, run one persisted PAPER champion + SHADOW cycle."
+            "execution window, run one persisted PAPER champion + SHADOW cycle and "
+            "refresh realized forward-decision outcomes."
         )
     )
     parser.add_argument("--data-root", type=Path, default=Path("data"))

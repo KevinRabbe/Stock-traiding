@@ -10,6 +10,7 @@ from stock_trading.storage import DuckDbEventStore
 from .candidates import PitCandidateAssembler
 from .current_cycle_receipt import FileCurrentCycleReceiptStore
 from .decision_diagnostics import (
+    FileStrategyDecisionDiagnosticStore,
     diagnose_registry,
     diagnostics_payload,
     rewind_registry_calibration_before,
@@ -24,12 +25,16 @@ def diagnose_current_receipt(
     data_root: str | Path = "data",
     runtime_dir: str | Path = "data/runtime",
     batch_id: str | None = None,
+    persist: bool = False,
 ) -> dict:
-    """Read-only replay of the model scoring/gating for one completed current batch.
+    """Replay model scoring/gating for one completed current batch.
 
     The current mutable calibration overlay is loaded only into memory and rewound
-    to entries strictly before the receipt's target execution session. No queue,
-    ledger, receipt, strategy-state, audit, or artifact file is written.
+    to entries strictly before the receipt's target execution session. By default
+    the command is completely read-only. ``persist=True`` is the single permitted
+    write: the reconstructed diagnostics are stored through the same immutable-style
+    batch diagnostic store used by live cycles. Queue, ledger, receipt, strategy
+    state, model artifacts, and calibration remain untouched.
     """
 
     data_root = Path(data_root)
@@ -97,9 +102,25 @@ def diagnose_current_receipt(
             f"receipt={sorted(expected_ids)} current={sorted(diagnostic_ids)}"
         )
 
+    diagnostic_path = None
+    if persist:
+        diagnostic_path = FileStrategyDecisionDiagnosticStore(
+            runtime_dir / "decision_diagnostics"
+        ).write(
+            batch_id=receipt.batch_id,
+            as_of=receipt.completed_at,
+            target_execution_date=receipt.target_execution_date,
+            diagnostics=diagnostics,
+        )
+
     return {
-        "mode": "read_only_completed_receipt_diagnosis",
-        "writes_performed": False,
+        "mode": (
+            "completed_receipt_diagnosis_with_persisted_audit"
+            if persist
+            else "read_only_completed_receipt_diagnosis"
+        ),
+        "writes_performed": persist,
+        "diagnostic_path": str(diagnostic_path) if diagnostic_path else None,
         "batch_id": receipt.batch_id,
         "completed_at": receipt.completed_at.isoformat(),
         "target_execution_date": receipt.target_execution_date.isoformat(),
@@ -134,13 +155,21 @@ def _company_ids_from_candidate_ids(candidate_ids: tuple[str, ...]) -> tuple[str
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Read-only reconstruction of per-horizon predictions, calibration ranks, "
-            "eligibility gates and rejection reasons for one completed PAPER/SHADOW receipt."
+            "Reconstruct per-horizon predictions, calibration ranks, eligibility gates "
+            "and rejection reasons for one completed PAPER/SHADOW receipt."
         )
     )
     parser.add_argument("--data-root", type=Path, default=Path("data"))
     parser.add_argument("--runtime-dir", type=Path, default=Path("data/runtime"))
     parser.add_argument("--batch-id")
+    parser.add_argument(
+        "--persist",
+        action="store_true",
+        help=(
+            "Persist the reconstructed immutable-style decision diagnostic audit. "
+            "No trading or calibration state is changed."
+        ),
+    )
     return parser
 
 
@@ -150,6 +179,7 @@ def main() -> None:
         data_root=args.data_root,
         runtime_dir=args.runtime_dir,
         batch_id=args.batch_id,
+        persist=args.persist,
     )
     print(json.dumps(result, indent=2, sort_keys=True, allow_nan=False))
 

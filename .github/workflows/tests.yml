@@ -47,3 +47,4 @@ jobs:
           python -W error -m stock_trading.live.run_current_paper_shadow --help
           python -W error -m stock_trading.live.diagnose_current_receipt --help
           python -W error -m stock_trading.live.run_current_pipeline --help
+          python -W error -m stock_trading.live.refresh_forward_outcomes --help

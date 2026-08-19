@@ -33,11 +33,25 @@ def test_rolling_score_history_updates_only_eligible_values() -> None:
     assert all(score != 0.9 for _, score in history.snapshot())
 
 
-def test_rolling_score_history_prunes_values_outside_window() -> None:
+def test_read_only_percentiles_ignore_expired_values_without_mutating_history() -> None:
     history = RollingScoreHistory(window_days=10)
-    history.seed(((date(2025, 1, 1), 0.99), (date(2025, 1, 15), 0.1)))
+    seeded = ((date(2025, 1, 1), 0.99), (date(2025, 1, 15), 0.1))
+    history.seed(seeded)
 
     result = history.percentiles(date(2025, 1, 20), (0.5,), update=False)
 
     assert result == pytest.approx((1.0,))
-    assert history.snapshot() == ((date(2025, 1, 15), 0.1),)
+    assert history.snapshot() == seeded
+
+
+def test_mutating_percentiles_prune_values_outside_window() -> None:
+    history = RollingScoreHistory(window_days=10)
+    history.seed(((date(2025, 1, 1), 0.99), (date(2025, 1, 15), 0.1)))
+
+    result = history.percentiles(date(2025, 1, 20), (0.5,))
+
+    assert result == pytest.approx((1.0,))
+    assert history.snapshot() == (
+        (date(2025, 1, 15), 0.1),
+        (date(2025, 1, 20), 0.5),
+    )

@@ -13,7 +13,19 @@ from .prices import (
 )
 
 
-class SessionClosePaperExecutionBroker(PaperExecutionBroker):
+class _PendingEntryReservationMixin:
+    """Expose durable queued BUYs to portfolio allocation as reserved capacity."""
+
+    def pending_entry_orders(self) -> tuple[OrderIntent, ...]:
+        state = self.ledger.load()
+        return tuple(
+            order
+            for order in state.pending_orders
+            if order.side is OrderSide.BUY
+        )
+
+
+class SessionClosePaperExecutionBroker(_PendingEntryReservationMixin, PaperExecutionBroker):
     """Fill queued orders on their intended session instead of restart wall-clock.
 
     The base paper broker asks its price provider using the settlement timestamp.
@@ -36,7 +48,7 @@ class SessionClosePaperExecutionBroker(PaperExecutionBroker):
         return super()._fill(order, effective_at, cash, positions)
 
 
-class SessionBarPaperExecutionBroker(PaperExecutionBroker):
+class SessionBarPaperExecutionBroker(_PendingEntryReservationMixin, PaperExecutionBroker):
     """Model the strategy's daily-bar execution contract without date drift.
 
     BUY orders use the adjusted open of their exact ``execute_on`` session because

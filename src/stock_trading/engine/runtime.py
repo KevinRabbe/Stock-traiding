@@ -10,6 +10,7 @@ from .contracts import (
     Opportunity,
     OrderIntent,
     OrderSide,
+    PortfolioPosition,
     PortfolioSnapshot,
     PreparedEngineCycle,
 )
@@ -97,9 +98,19 @@ class TradingEngine:
         eligible = self._opportunity_risk.filter(opportunities, portfolio)
         _validate_subset(opportunities, eligible, "opportunity risk")
 
-        proposed_allocations = self._portfolio_policy.allocate(eligible, portfolio)
+        allocation_portfolio = _portfolio_with_pending_entry_reservations(
+            portfolio,
+            self._broker,
+        )
+        proposed_allocations = self._portfolio_policy.allocate(
+            eligible,
+            allocation_portfolio,
+        )
         _validate_allocations(proposed_allocations, eligible)
-        allocations = self._portfolio_risk.filter(proposed_allocations, portfolio)
+        allocations = self._portfolio_risk.filter(
+            proposed_allocations,
+            allocation_portfolio,
+        )
         _validate_allocation_subset(proposed_allocations, allocations)
 
         entry_orders = tuple(_entry_order(item, as_of) for item in allocations)
@@ -133,6 +144,78 @@ def validate_strategy_opportunities(
     """Public validation used by shadow evaluation and the champion runtime."""
 
     _validate_opportunities(strategy_id, opportunities, _unique_candidates(candidates))
+
+
+def _portfolio_with_pending_entry_reservations(
+    portfolio: PortfolioSnapshot,
+    broker: ExecutionBroker,
+) -> PortfolioSnapshot:
+    """Reserve allocation capacity for durable BUY orders that have not filled yet.
+
+    The returned snapshot is used only by portfolio allocation/risk. Strategy
+    evaluation and position management retain the real filled-position snapshot,
+    so a queued entry can reserve a company/slot/exposure without masquerading as
+    an open position that is eligible for an exit order.
+    """
+
+    provider = getattr(broker, "pending_entry_orders", None)
+    if not callable(provider):
+        return portfolio
+
+    pending = tuple(provider())
+    if not pending:
+        return portfolio
+
+    occupied_companies = {position.company_id for position in portfolio.positions}
+    reservations: list[PortfolioPosition] = []
+    reserved_exposure = 0.0
+    for order in sorted(
+        pending,
+        key=lambda item: (
+            item.execute_on or item.created_at.date(),
+            item.created_at,
+            item.order_id,
+        ),
+    ):
+        if order.side is not OrderSide.BUY:
+            raise ValueError("pending entry reservation provider returned a non-BUY order")
+        # The PAPER broker permits only one filled position per company. If a
+        # position is already open, or an earlier queued BUY already reserved the
+        # company, another queued BUY cannot consume an additional eventual slot.
+        if order.company_id in occupied_companies:
+            continue
+        occupied_companies.add(order.company_id)
+        reserved_exposure += order.allocation_pct
+        reservations.append(
+            PortfolioPosition(
+                position_id=f"reserved_{order.order_id}",
+                strategy_id=order.strategy_id,
+                company_id=order.company_id,
+                security_id=order.security_id,
+                allocation_pct=order.allocation_pct,
+                opened_on=order.created_at.date(),
+                metadata={
+                    "pending_entry_reservation": True,
+                    "order_id": order.order_id,
+                    "execute_on": (
+                        (order.execute_on or order.created_at.date()).isoformat()
+                    ),
+                },
+            )
+        )
+
+    if not reservations:
+        return portfolio
+    return PortfolioSnapshot(
+        as_of=portfolio.as_of,
+        equity=portfolio.equity,
+        cash=portfolio.cash,
+        gross_exposure_pct=min(
+            1.0,
+            portfolio.gross_exposure_pct + reserved_exposure,
+        ),
+        positions=(*portfolio.positions, *reservations),
+    )
 
 
 def _unique_candidates(

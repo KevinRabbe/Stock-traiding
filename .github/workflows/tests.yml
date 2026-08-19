@@ -32,6 +32,8 @@ jobs:
         run: python -c "from zoneinfo import ZoneInfo; assert str(ZoneInfo('America/New_York')) == 'America/New_York'"
       - name: Verify current SEC archive URL
         run: python -c "from stock_trading.sec import SecClient; assert SecClient.quarterly_archive_url(2012, 1) == 'https://www.sec.gov/files/structureddata/data/insider-transactions-data-sets/2012q1_form345.zip'"
+      - name: Verify runtime process lock
+        run: python -c "from pathlib import Path; from tempfile import TemporaryDirectory; from stock_trading.live.runtime_lock import FileRuntimeLock; root=TemporaryDirectory(); path=Path(root.name)/'runtime.lock'; first=FileRuntimeLock(path); second=FileRuntimeLock(path); assert first.acquire(); assert not second.acquire(); first.release(); assert second.acquire(); second.release(); root.cleanup()"
       - name: Verify experiment CLI imports
         shell: pwsh
         run: |

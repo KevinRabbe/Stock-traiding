@@ -13,6 +13,7 @@ from .forward_outcomes import refresh_forward_outcome_scorecard
 from .paper_lifecycle import service_current_paper_lifecycle
 from .poll_sec_form4 import poll_current_form4
 from .run_current_paper_shadow import run_current_paper_shadow_cycle
+from .runtime_lock import FileRuntimeLock
 from .session_calendar import XnysExecutionSessionResolver
 
 
@@ -80,6 +81,51 @@ def evaluate_pipeline_session_guard(
 
 
 def run_current_pipeline(
+    *,
+    data_root: str | Path = "data",
+    experiment_dir: str | Path = "data/experiments/lightgbm_holdout_250_v2",
+    runtime_dir: str | Path = "data/runtime",
+    initial_lookback_days: int = 7,
+    max_companies: int | None = None,
+    minimum_preopen_buffer_minutes: int = 15,
+) -> dict:
+    """Run one single-instance authoritative current PAPER pipeline."""
+
+    runtime_path = Path(runtime_dir)
+    lock = FileRuntimeLock(runtime_path / "current_pipeline.lock")
+    if not lock.acquire():
+        return {
+            "status": "runtime_busy",
+            "runtime_lock": {
+                "acquired": False,
+                "holder": lock.holder(),
+            },
+            "poll_started_at": None,
+            "post_poll_as_of": None,
+            "post_lifecycle_as_of": None,
+            "session_guard": None,
+            "poll": None,
+            "paper_lifecycle": None,
+            "cycle": None,
+            "forward_outcomes": None,
+        }
+
+    try:
+        result = _run_current_pipeline_locked(
+            data_root=data_root,
+            experiment_dir=experiment_dir,
+            runtime_dir=runtime_path,
+            initial_lookback_days=initial_lookback_days,
+            max_companies=max_companies,
+            minimum_preopen_buffer_minutes=minimum_preopen_buffer_minutes,
+        )
+        result["runtime_lock"] = {"acquired": True}
+        return result
+    finally:
+        lock.release()
+
+
+def _run_current_pipeline_locked(
     *,
     data_root: str | Path = "data",
     experiment_dir: str | Path = "data/experiments/lightgbm_holdout_250_v2",

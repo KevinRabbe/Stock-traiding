@@ -243,11 +243,14 @@ class PaperExecutionBroker:
         price: float,
         cash: float,
         positions: list[PaperPositionState],
+        *,
+        mark_price_provider: PriceProvider | None = None,
     ) -> tuple[float, ExecutionReport]:
         if any(item.company_id == order.company_id for item in positions):
             return cash, _rejected_report(order, as_of, "company already has an open position")
 
-        equity = _marked_equity(cash, positions, self.price_provider, as_of)
+        marks = mark_price_provider or self.price_provider
+        equity = _marked_equity(cash, positions, marks, as_of)
         target_notional = equity * order.allocation_pct
         fee_rate = self.per_side_cost_bps / 10_000.0
         max_notional = cash / (1.0 + fee_rate) if fee_rate >= 0 else cash
@@ -291,6 +294,8 @@ class PaperExecutionBroker:
         price: float,
         cash: float,
         positions: list[PaperPositionState],
+        *,
+        mark_price_provider: PriceProvider | None = None,
     ) -> tuple[float, ExecutionReport]:
         match_index = next(
             (
@@ -305,12 +310,16 @@ class PaperExecutionBroker:
         if match_index is None:
             return cash, _rejected_report(order, as_of, "position is not open")
         position = positions[match_index]
-        equity = _marked_equity(cash, positions, self.price_provider, as_of)
+        marks = mark_price_provider or self.price_provider
+        equity = _marked_equity(cash, positions, marks, as_of)
         position_value = position.shares * price
-        target_notional = equity * order.allocation_pct
-        notional = min(position_value, target_notional)
-        if target_notional >= position_value * (1.0 - 1e-9):
+        if bool(order.metadata.get("full_exit")):
             notional = position_value
+        else:
+            target_notional = equity * order.allocation_pct
+            notional = min(position_value, target_notional)
+            if target_notional >= position_value * (1.0 - 1e-9):
+                notional = position_value
         shares_to_sell = min(position.shares, notional / price)
         if shares_to_sell <= 1e-12:
             return cash, _rejected_report(order, as_of, "sell amount is too small")
@@ -400,8 +409,11 @@ def _marked_equity(
 ) -> float:
     equity = cash
     for position in positions:
-        current = prices.price(position.security_id, as_of)
-        price = float(current) if current is not None else position.last_price
+        if position.opened_at.date() == as_of.date():
+            price = position.last_price
+        else:
+            current = prices.price(position.security_id, as_of)
+            price = float(current) if current is not None else position.last_price
         equity += position.shares * price
     return equity
 

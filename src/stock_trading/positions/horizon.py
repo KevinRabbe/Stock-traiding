@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import timedelta
 from hashlib import sha256
 
 from stock_trading.engine import (
@@ -14,12 +13,12 @@ from stock_trading.market import DuckDbMarketStore
 
 
 class FixedHorizonPositionManager:
-    """Exit positions after their strategy-selected number of observed sessions.
+    """Exit positions at the close of their exact strategy-selected horizon.
 
-    The manager only inspects bars strictly available by `as_of`. It deliberately
-    ignores future bars even when a historical market database contains them.
-    Repeat/new candidate information is accepted by the interface for future
-    thesis-aware managers but does not change this deterministic baseline.
+    A restart may happen several sessions after the intended exit. The manager
+    therefore derives the terminal session from observed bars starting at the
+    position's opening session and keeps that original date in ``execute_on``.
+    Future rows are ignored even when a historical database contains them.
     """
 
     def __init__(
@@ -42,7 +41,6 @@ class FixedHorizonPositionManager:
     ) -> tuple[OrderIntent, ...]:
         del candidates, opportunities
         orders: list[OrderIntent] = []
-        cutoff = as_of.date() + timedelta(days=1)
 
         for position in sorted(portfolio.positions, key=lambda item: item.position_id):
             raw_horizon = position.metadata.get("horizon_sessions")
@@ -63,14 +61,17 @@ class FixedHorizonPositionManager:
                     "position horizon exceeds configured PIT session lookback"
                 )
 
-            bars = self.market_store.bars_before(
+            first_horizon_bars = self.market_store.bars_from(
                 position.security_id,
-                cutoff,
-                self.max_session_lookback,
+                position.opened_on,
+                horizon,
             )
-            held_sessions = sum(bar.date >= position.opened_on for bar in bars)
-            if held_sessions < horizon:
+            observed = tuple(
+                bar for bar in first_horizon_bars if bar.date <= as_of.date()
+            )
+            if len(observed) < horizon:
                 continue
+            exit_date = observed[horizon - 1].date
 
             digest = sha256(
                 f"{position.position_id}|fixed-horizon-exit".encode("utf-8")
@@ -85,11 +86,13 @@ class FixedHorizonPositionManager:
                     allocation_pct=position.allocation_pct,
                     created_at=as_of,
                     horizon_sessions=horizon,
-                    execute_on=as_of.date(),
+                    execute_on=exit_date,
                     reason="strategy_horizon_complete",
                     metadata={
                         "position_id": position.position_id,
-                        "held_sessions": held_sessions,
+                        "held_sessions": len(observed),
+                        "intended_exit_date": exit_date.isoformat(),
+                        "full_exit": True,
                     },
                 )
             )

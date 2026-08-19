@@ -14,9 +14,13 @@ class _MarketStore:
         self.dates = tuple(dates)
         self.calls = []
 
-    def bars_before(self, security_id, cutoff, limit):
-        self.calls.append((security_id, cutoff, limit))
-        return [SimpleNamespace(date=day) for day in self.dates if day < cutoff][-limit:]
+    def bars_from(self, security_id, start_day, limit):
+        self.calls.append((security_id, start_day, limit))
+        return [
+            SimpleNamespace(date=day)
+            for day in self.dates
+            if day >= start_day
+        ][:limit]
 
 
 def _portfolio(as_of, *, horizon=5):
@@ -62,20 +66,33 @@ def test_fixed_horizon_manager_exits_only_after_observed_sessions() -> None:
     assert order.execute_on == due.date()
     assert order.reason == "strategy_horizon_complete"
     assert order.metadata["held_sessions"] == 5
-    # Query cutoff is only tomorrow relative to the current cycle, never a future
-    # horizon-derived date from the historical database.
-    assert store.calls[-1][1] == date(2025, 1, 9)
+    assert order.metadata["full_exit"] is True
+    assert order.metadata["intended_exit_date"] == "2025-01-08"
+    assert store.calls[-1] == ("security-a", date(2025, 1, 2), 5)
 
 
-def test_fixed_horizon_exit_order_id_is_stable_across_retry() -> None:
-    store = _MarketStore(tuple(date(2025, 1, day) for day in range(2, 10)))
+def test_fixed_horizon_restart_keeps_original_terminal_session() -> None:
+    store = _MarketStore(
+        (
+            date(2025, 1, 2),
+            date(2025, 1, 3),
+            date(2025, 1, 6),
+            date(2025, 1, 7),
+            date(2025, 1, 8),
+            date(2025, 1, 9),
+            date(2025, 1, 10),
+        )
+    )
     manager = FixedHorizonPositionManager(store)
-    as_of = datetime(2025, 1, 8, 20, tzinfo=timezone.utc)
+    due = datetime(2025, 1, 8, 20, tzinfo=timezone.utc)
+    restarted = datetime(2025, 1, 10, 20, tzinfo=timezone.utc)
 
-    first = manager.orders(_portfolio(as_of), as_of, (), ())[0]
-    second = manager.orders(_portfolio(as_of), as_of, (), ())[0]
+    first = manager.orders(_portfolio(due), due, (), ())[0]
+    recovered = manager.orders(_portfolio(restarted), restarted, (), ())[0]
 
-    assert first.order_id == second.order_id
+    assert first.order_id == recovered.order_id
+    assert first.execute_on == date(2025, 1, 8)
+    assert recovered.execute_on == date(2025, 1, 8)
 
 
 def test_fixed_horizon_manager_rejects_invalid_position_horizon() -> None:

@@ -15,10 +15,10 @@ from stock_trading.engine import (
     TradingEngine,
 )
 from stock_trading.execution import (
-    DuckDbClosePriceProvider,
+    DuckDbLatestClosePriceProvider,
     FilePaperLedger,
     PaperPortfolioStateProvider,
-    SessionClosePaperExecutionBroker,
+    SessionBarPaperExecutionBroker,
 )
 from stock_trading.local_secrets import load_tiingo_credentials
 from stock_trading.market import CandidateSnapshotBuilder, DuckDbMarketStore, TiingoClient
@@ -299,11 +299,11 @@ def run_current_paper_shadow_cycle(
         one_position_per_company=True,
     )
     portfolio_risk = PassThroughPortfolioRiskPolicy()
-    price_provider = DuckDbClosePriceProvider(market_store)
+    price_provider = DuckDbLatestClosePriceProvider(market_store)
     ledger = FilePaperLedger(Path(str(config["paper_ledger"])), starting_cash=10_000.0)
-    broker = SessionClosePaperExecutionBroker(
+    broker = SessionBarPaperExecutionBroker(
         ledger,
-        price_provider,
+        market_store,
         per_side_cost_bps=10.0,
     )
     engine = TradingEngine(

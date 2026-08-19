@@ -3,19 +3,23 @@ from __future__ import annotations
 from datetime import datetime
 
 from stock_trading.engine import OrderIntent, OrderSide
+from stock_trading.market import DuckDbMarketStore
 
-from .paper import PaperExecutionBroker, PaperPositionState
+from .paper import FilePaperLedger, PaperExecutionBroker, PaperPositionState
+from .prices import (
+    DuckDbLatestClosePriceProvider,
+    DuckDbPreviousClosePriceProvider,
+    PriceProvider,
+)
 
 
 class SessionClosePaperExecutionBroker(PaperExecutionBroker):
-    """Daily-bar paper broker that fills queued orders on their intended session.
+    """Fill queued orders on their intended session instead of restart wall-clock.
 
-    The base broker queues an order until a price becomes available. When a process
-    resumes on a later calendar day, using the resume timestamp for a daily-close
-    price would silently move the fill to that later day. This adapter instead asks
-    the PriceProvider for the order's ``execute_on`` date and records the effective
-    fill/open timestamp on that session date while retaining the resume time-of-day
-    and timezone. It is intended for the current daily-bar PAPER runtime.
+    The base paper broker asks its price provider using the settlement timestamp.
+    During a restart that could price a Jan-03 order from Jan-05 market data. This
+    adapter keeps the durable queue but evaluates a due order against its original
+    ``execute_on`` date, matching the candidate's execution session.
     """
 
     def _fill(
@@ -29,12 +33,64 @@ class SessionClosePaperExecutionBroker(PaperExecutionBroker):
         if execute_on > as_of.date():
             return None
         effective_at = datetime.combine(execute_on, as_of.timetz())
-        price = self.price_provider.price(order.security_id, effective_at)
-        if price is None:
+        return super()._fill(order, effective_at, cash, positions)
+
+
+class SessionBarPaperExecutionBroker(PaperExecutionBroker):
+    """Model the strategy's daily-bar execution contract without date drift.
+
+    BUY orders use the adjusted open of their exact ``execute_on`` session because
+    current candidates are defined for next-session-open execution. SELL orders use
+    the adjusted close of their exact terminal session, matching the forward-label
+    convention. The broker may learn those prices later from completed EOD data, but
+    a restart never moves an order to the restart day's bar.
+    """
+
+    def __init__(
+        self,
+        ledger: FilePaperLedger,
+        market_store: DuckDbMarketStore,
+        *,
+        per_side_cost_bps: float = 10.0,
+    ) -> None:
+        self.market_store = market_store
+        self.latest_close_provider = DuckDbLatestClosePriceProvider(market_store)
+        self.previous_close_provider = DuckDbPreviousClosePriceProvider(market_store)
+        super().__init__(
+            ledger,
+            self.latest_close_provider,
+            per_side_cost_bps=per_side_cost_bps,
+        )
+
+    def _fill(
+        self,
+        order: OrderIntent,
+        as_of: datetime,
+        cash: float,
+        positions: list[PaperPositionState],
+    ):
+        execute_on = order.execute_on or order.created_at.date()
+        if execute_on > as_of.date():
             return None
-        price = float(price)
-        if price <= 0:
-            raise ValueError("price provider returned non-positive price")
+        bar = self.market_store.bar_on(order.security_id, execute_on)
+        if bar is None:
+            return None
+
+        effective_at = datetime.combine(execute_on, as_of.timetz())
         if order.side is OrderSide.BUY:
-            return self._fill_buy(order, effective_at, price, cash, positions)
-        return self._fill_sell(order, effective_at, price, cash, positions)
+            return self._fill_buy(
+                order,
+                effective_at,
+                float(bar.adj_open),
+                cash,
+                positions,
+                mark_price_provider=self.previous_close_provider,
+            )
+        return self._fill_sell(
+            order,
+            effective_at,
+            float(bar.adj_close),
+            cash,
+            positions,
+            mark_price_provider=self.latest_close_provider,
+        )

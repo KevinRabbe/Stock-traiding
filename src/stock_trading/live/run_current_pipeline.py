@@ -10,6 +10,7 @@ from stock_trading.core import as_utc
 from stock_trading.market.execution_time import decision_market_date
 
 from .forward_outcomes import refresh_forward_outcome_scorecard
+from .paper_lifecycle import service_current_paper_lifecycle
 from .poll_sec_form4 import poll_current_form4
 from .run_current_paper_shadow import run_current_paper_shadow_cycle
 from .session_calendar import XnysExecutionSessionResolver
@@ -31,14 +32,12 @@ def evaluate_pipeline_session_guard(
     now: datetime,
     minimum_preopen_buffer: timedelta = timedelta(minutes=15),
 ) -> PipelineSessionGuard:
-    """Fail closed if SEC polling consumed an execution-session boundary.
+    """Fail closed if polling/lifecycle work consumed an execution-session boundary.
 
-    A poll can take long enough to cross the NYSE open. The pending selection was
-    classified at poll start, so the orchestration layer must re-evaluate the
-    executable session before giving the PAPER runner any authority. For a same-day
-    pre-open target we additionally require a safety buffer, preventing a cycle from
-    starting seconds before the opening bell and finishing after the opportunity was
-    already missed.
+    A poll or PAPER lifecycle catch-up can take long enough to cross the NYSE open.
+    Pending selection was classified at poll start, so the orchestration layer must
+    re-evaluate the executable session after both non-signal phases finish. For a
+    same-day pre-open target we additionally require a safety buffer.
     """
 
     cutoff = as_utc(now)
@@ -89,15 +88,12 @@ def run_current_pipeline(
     max_companies: int | None = None,
     minimum_preopen_buffer_minutes: int = 15,
 ) -> dict:
-    """Poll current Form 4 intake, guard the session boundary, then run PAPER+SHADOW.
+    """Poll SEC, service durable PAPER state, guard the session, then evaluate signals.
 
-    This is the preferred operational entry point. SEC intake remains non-authority;
-    PAPER authority begins only after polling completes, the current XNYS target is
-    re-resolved, and any same-day target retains the configured pre-open buffer.
-
-    After the authoritative cycle is durable, a separate measurement-only step
-    refreshes realized labels for prior forward decision candidates. Outcome refresh
-    can never acknowledge events, place orders, or mutate strategy calibration.
+    PAPER lifecycle servicing is independent from new SEC events: due queued entries
+    and exact-horizon exits are caught up through the last completed XNYS session on
+    every invocation. New decision authority begins only after that catch-up and a
+    fresh execution-session guard. Forward outcomes remain downstream measurement.
     """
 
     if minimum_preopen_buffer_minutes <= 0:
@@ -122,11 +118,36 @@ def run_current_pipeline(
     except (KeyError, ValueError) as exc:
         raise RuntimeError("current Form 4 poll returned an invalid target session") from exc
 
+    try:
+        paper_lifecycle = service_current_paper_lifecycle(
+            data_root=data_root,
+            runtime_dir=runtime_dir,
+            as_of=after_poll,
+        )
+    except Exception as exc:
+        after_lifecycle = datetime.now(timezone.utc)
+        return {
+            "status": "paper_lifecycle_error",
+            "poll_started_at": poll_started_at.isoformat(),
+            "post_poll_as_of": after_poll.isoformat(),
+            "post_lifecycle_as_of": after_lifecycle.isoformat(),
+            "session_guard": None,
+            "poll": poll_payload,
+            "paper_lifecycle": {
+                "status": "error",
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+            },
+            "cycle": None,
+            "forward_outcomes": None,
+        }
+
+    after_lifecycle = datetime.now(timezone.utc)
     resolver = XnysExecutionSessionResolver()
     guard = evaluate_pipeline_session_guard(
         resolver,
         polled_target_execution_date=polled_target,
-        now=after_poll,
+        now=after_lifecycle,
         minimum_preopen_buffer=timedelta(minutes=minimum_preopen_buffer_minutes),
     )
     guard_payload = {
@@ -142,31 +163,32 @@ def run_current_pipeline(
             "status": guard.reason,
             "poll_started_at": poll_started_at.isoformat(),
             "post_poll_as_of": after_poll.isoformat(),
+            "post_lifecycle_as_of": after_lifecycle.isoformat(),
             "session_guard": guard_payload,
             "poll": poll_payload,
+            "paper_lifecycle": paper_lifecycle,
             "cycle": None,
             "forward_outcomes": None,
         }
 
-    # Use a fresh post-poll timestamp. Never carry the poll-start timestamp into the
-    # trading cycle; doing so could make an already-crossed wall-clock boundary look
-    # artificially actionable.
+    # Use a fresh post-lifecycle timestamp. Never carry the poll-start timestamp into
+    # the trading cycle; doing so could make a crossed wall-clock boundary actionable.
     cycle_payload = run_current_paper_shadow_cycle(
         data_root=data_root,
         runtime_dir=runtime_dir,
-        as_of=after_poll,
+        as_of=after_lifecycle,
     )
 
-    # The trading cycle above is already authoritative/durable. Forward outcome
-    # refresh is intentionally downstream measurement. Return a structured error
-    # instead of turning a completed PAPER receipt into an ambiguous traceback.
+    # The trading/lifecycle authority above is already durable. Forward outcome
+    # refresh is measurement only and cannot turn a completed PAPER operation into
+    # an ambiguous traceback.
     try:
         forward_outcomes = refresh_forward_outcome_scorecard(
             data_root=data_root,
             runtime_dir=runtime_dir,
             as_of=datetime.now(timezone.utc),
         )
-    except Exception as exc:  # measurement must not rewrite trading semantics
+    except Exception as exc:
         forward_outcomes = {
             "status": "error",
             "error_type": type(exc).__name__,
@@ -183,8 +205,10 @@ def run_current_pipeline(
         "status": status,
         "poll_started_at": poll_started_at.isoformat(),
         "post_poll_as_of": after_poll.isoformat(),
+        "post_lifecycle_as_of": after_lifecycle.isoformat(),
         "session_guard": guard_payload,
         "poll": poll_payload,
+        "paper_lifecycle": paper_lifecycle,
         "cycle": cycle_payload,
         "forward_outcomes": forward_outcomes,
     }
@@ -193,9 +217,9 @@ def run_current_pipeline(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Poll current SEC Form 4 filings and, only after re-validating the XNYS "
-            "execution window, run one persisted PAPER champion + SHADOW cycle and "
-            "refresh realized forward-decision outcomes."
+            "Poll current SEC Form 4 filings, catch up durable PAPER orders/positions "
+            "through the last completed XNYS session, re-validate the execution window, "
+            "run one PAPER+SHADOW decision batch, and refresh forward outcomes."
         )
     )
     parser.add_argument("--data-root", type=Path, default=Path("data"))

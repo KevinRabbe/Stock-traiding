@@ -5,11 +5,19 @@ from .paper import (
     PaperPortfolioStateProvider,
     PaperPositionState,
 )
-from .prices import DuckDbClosePriceProvider, FixedPriceProvider, PriceProvider
-from .session_paper import SessionClosePaperExecutionBroker
+from .prices import (
+    DuckDbClosePriceProvider,
+    DuckDbLatestClosePriceProvider,
+    DuckDbPreviousClosePriceProvider,
+    FixedPriceProvider,
+    PriceProvider,
+)
+from .session_paper import SessionBarPaperExecutionBroker, SessionClosePaperExecutionBroker
 
 __all__ = [
     "DuckDbClosePriceProvider",
+    "DuckDbLatestClosePriceProvider",
+    "DuckDbPreviousClosePriceProvider",
     "FilePaperLedger",
     "FixedPriceProvider",
     "PaperExecutionBroker",
@@ -17,5 +25,6 @@ __all__ = [
     "PaperPortfolioStateProvider",
     "PaperPositionState",
     "PriceProvider",
+    "SessionBarPaperExecutionBroker",
     "SessionClosePaperExecutionBroker",
 ]

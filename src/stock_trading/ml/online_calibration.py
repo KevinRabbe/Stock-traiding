@@ -11,6 +11,11 @@ class RollingScoreHistory:
     A batch for ``current_date`` is always ranked only against strictly earlier
     dates. The entire batch is appended after all percentiles are calculated, so
     candidates on the same execution date cannot influence one another.
+
+    ``update=False`` is a genuinely read-only query: expired rows are ignored for
+    ranking but the persisted/in-memory history is not rewritten. Mutating calls
+    keep the historical behavior of pruning to the active window before appending
+    the current eligible batch.
     """
 
     def __init__(self, *, window_days: int = 365) -> None:
@@ -40,10 +45,10 @@ class RollingScoreHistory:
             raise ValueError("score/eligibility lengths differ")
 
         cutoff = current_date - timedelta(days=self.window_days)
-        self._history = [
+        active_history = [
             item for item in self._history if cutoff <= item[0] < current_date
         ]
-        sorted_scores = sorted(score for _, score in self._history)
+        sorted_scores = sorted(score for _, score in active_history)
         result = tuple(
             _percentile(sorted_scores, float(score))
             if is_eligible
@@ -52,6 +57,7 @@ class RollingScoreHistory:
         )
 
         if update:
+            self._history = active_history
             self._history.extend(
                 (current_date, float(score))
                 for score, is_eligible in zip(scores, eligible, strict=True)

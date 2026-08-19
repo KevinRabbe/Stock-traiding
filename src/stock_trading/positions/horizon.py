@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from hashlib import sha256
 
 from stock_trading.engine import (
@@ -16,9 +17,10 @@ class FixedHorizonPositionManager:
     """Exit positions at the close of their exact strategy-selected horizon.
 
     A restart may happen several sessions after the intended exit. The manager
-    therefore derives the terminal session from observed bars starting at the
-    position's opening session and keeps that original date in ``execute_on``.
-    Future rows are ignored even when a historical database contains them.
+    therefore derives the terminal session from observed bars and reconstructs the
+    logical exit order on that original date. ``observed_at`` in metadata preserves
+    when a later process actually discovered/recovered the order. Future rows are
+    ignored even when a historical database contains them.
     """
 
     def __init__(
@@ -72,6 +74,7 @@ class FixedHorizonPositionManager:
             if len(observed) < horizon:
                 continue
             exit_date = observed[horizon - 1].date
+            logical_created_at = datetime.combine(exit_date, as_of.timetz())
 
             digest = sha256(
                 f"{position.position_id}|fixed-horizon-exit".encode("utf-8")
@@ -84,7 +87,7 @@ class FixedHorizonPositionManager:
                     security_id=position.security_id,
                     side=OrderSide.SELL,
                     allocation_pct=position.allocation_pct,
-                    created_at=as_of,
+                    created_at=logical_created_at,
                     horizon_sessions=horizon,
                     execute_on=exit_date,
                     reason="strategy_horizon_complete",
@@ -92,6 +95,7 @@ class FixedHorizonPositionManager:
                         "position_id": position.position_id,
                         "held_sessions": len(observed),
                         "intended_exit_date": exit_date.isoformat(),
+                        "observed_at": as_of.isoformat(),
                         "full_exit": True,
                     },
                 )

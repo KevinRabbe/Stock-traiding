@@ -64,10 +64,12 @@ def test_fixed_horizon_manager_exits_only_after_observed_sessions() -> None:
     order = orders[0]
     assert order.company_id == "company-a"
     assert order.execute_on == due.date()
+    assert order.created_at == due
     assert order.reason == "strategy_horizon_complete"
     assert order.metadata["held_sessions"] == 5
     assert order.metadata["full_exit"] is True
     assert order.metadata["intended_exit_date"] == "2025-01-08"
+    assert order.metadata["observed_at"] == due.isoformat()
     assert store.calls[-1] == ("security-a", date(2025, 1, 2), 5)
 
 
@@ -93,6 +95,8 @@ def test_fixed_horizon_restart_keeps_original_terminal_session() -> None:
     assert first.order_id == recovered.order_id
     assert first.execute_on == date(2025, 1, 8)
     assert recovered.execute_on == date(2025, 1, 8)
+    assert recovered.created_at.date() == date(2025, 1, 8)
+    assert recovered.metadata["observed_at"] == restarted.isoformat()
 
 
 def test_fixed_horizon_manager_rejects_invalid_position_horizon() -> None:

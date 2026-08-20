@@ -40,6 +40,7 @@ from .decision_diagnostics import (
     validate_diagnostic_counts,
 )
 from .event_intake import DurablePendingTriggerProvider, FileCurrentEventQueue
+from .paper_order_recovery import receipt_champion_entry_order_ids
 from .pending_disposition import (
     FileStaleTriggerDispositionStore,
     dispose_stale_selection,
@@ -319,6 +320,7 @@ def run_current_paper_shadow_cycle(
         ledger,
         market_store,
         per_side_cost_bps=10.0,
+        runtime_batch_id=current_batch_id,
     )
     engine = TradingEngine(
         candidate_source=_StaticCandidateSource(cutoff, candidates),
@@ -341,6 +343,18 @@ def run_current_paper_shadow_cycle(
         engine,
         shadow_evaluator=shadow_evaluator,
     ).run_cycle(cutoff)
+    receipt_entry_order_ids = receipt_champion_entry_order_ids(
+        batch_id=current_batch_id,
+        champion_strategy_id=result.champion.strategy_id,
+        emitted_entry_orders=result.champion.entry_orders,
+        broker=broker,
+    )
+    emitted_entry_order_ids = {
+        order.order_id for order in result.champion.entry_orders
+    }
+    recovered_entry_order_count = len(
+        set(receipt_entry_order_ids) - emitted_entry_order_ids
+    )
 
     validate_diagnostic_counts(
         decision_diagnostics,
@@ -373,9 +387,7 @@ def run_current_paper_shadow_cycle(
         selected_event_ids=tuple(selection.selected_event_ids),
         candidate_ids=tuple(candidate.candidate_id for candidate in candidates),
         champion_strategy_id=result.champion.strategy_id,
-        champion_entry_order_ids=tuple(
-            order.order_id for order in result.champion.entry_orders
-        ),
+        champion_entry_order_ids=receipt_entry_order_ids,
         shadow_strategy_ids=tuple(item.strategy_id for item in result.shadows),
     )
     # Do not publish a receipt unless every champion entry it names is already
@@ -421,6 +433,8 @@ def run_current_paper_shadow_cycle(
                 }
                 for order in result.champion.entry_orders
             ],
+            "receipt_entry_order_ids": list(receipt_entry_order_ids),
+            "recovered_entry_order_count": recovered_entry_order_count,
             "executions": [
                 {
                     "order_id": report.order_id,

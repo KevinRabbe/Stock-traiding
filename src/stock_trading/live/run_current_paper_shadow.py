@@ -33,6 +33,11 @@ from .current_cycle_receipt import (
     reconcile_completed_receipts,
     verify_receipt_paper_orders,
 )
+from .current_cycle_transaction import (
+    CurrentCycleTransaction,
+    FileCurrentCycleTransactionStore,
+    recover_submitted_batch_receipts,
+)
 from .current_market import sync_pending_current_market
 from .decision_diagnostics import (
     FileStrategyDecisionDiagnosticStore,
@@ -40,6 +45,7 @@ from .decision_diagnostics import (
     validate_diagnostic_counts,
 )
 from .event_intake import DurablePendingTriggerProvider, FileCurrentEventQueue
+from .paper_order_recovery import receipt_champion_entry_order_ids
 from .pending_disposition import (
     FileStaleTriggerDispositionStore,
     dispose_stale_selection,
@@ -114,6 +120,14 @@ def run_current_paper_shadow_cycle(
     receipt_store = FileCurrentCycleReceiptStore(
         runtime_dir / "current_cycle_receipts"
     )
+    transaction_store = FileCurrentCycleTransactionStore(
+        runtime_dir / "current_cycle_transactions"
+    )
+    transaction_recovery = recover_submitted_batch_receipts(
+        transaction_store=transaction_store,
+        receipt_store=receipt_store,
+        paper_ledger=ledger,
+    )
     receipt_reconciliation = reconcile_completed_receipts(
         queue,
         receipt_store,
@@ -143,6 +157,11 @@ def run_current_paper_shadow_cycle(
     base_payload = {
         "as_of": cutoff.isoformat(),
         "target_execution_date": selection.target_execution_date.isoformat(),
+        "transaction_receipt_recovery": {
+            "transaction_count": transaction_recovery.transaction_count,
+            "recovered_receipt_count": transaction_recovery.recovered_receipt_count,
+            "recovered_batch_ids": list(transaction_recovery.recovered_batch_ids),
+        },
         "receipt_reconciliation": {
             "receipt_count": receipt_reconciliation.receipt_count,
             "matched_receipt_count": receipt_reconciliation.matched_receipt_count,
@@ -300,11 +319,33 @@ def run_current_paper_shadow_cycle(
     loaded = load_persisted_shadow_registry(runtime_dir=runtime_dir)
     state_store = FileRuntimeStrategyStateStore(runtime_dir / "strategy_state")
     restored_state_ids = state_store.restore_registry(loaded.registry)
+    transaction_path = transaction_store.write(
+        CurrentCycleTransaction(
+            batch_id=current_batch_id,
+            prepared_at=cutoff,
+            target_execution_date=selection.target_execution_date,
+            selected_event_ids=tuple(selection.selected_event_ids),
+            candidate_ids=tuple(candidate.candidate_id for candidate in candidates),
+            champion_strategy_id=loaded.champion_id,
+            shadow_strategy_ids=loaded.shadow_strategy_ids,
+        )
+    )
 
     # Explain the exact pre-decision model state without updating rolling calibration.
     # The real strategy path below remains authoritative; emitted counts are compared
     # before the diagnostic audit is allowed to become durable.
     decision_diagnostics = diagnose_registry(loaded.registry, candidates)
+
+    checkpoint_paths: tuple[Path, ...] = ()
+
+    def persist_strategy_state_before_broker() -> None:
+        nonlocal checkpoint_paths
+        if checkpoint_paths:
+            return
+        checkpoint_paths = state_store.save_registry_checkpoint(
+            loaded.registry,
+            evaluated_batch_id=current_batch_id,
+        )
 
     opportunity_risk = BasicOpportunityRiskPolicy(max_expected_downside=0.06)
     portfolio_policy = FixedAllocationPortfolioPolicy(
@@ -319,6 +360,8 @@ def run_current_paper_shadow_cycle(
         ledger,
         market_store,
         per_side_cost_bps=10.0,
+        runtime_batch_id=current_batch_id,
+        before_runtime_batch_commit=persist_strategy_state_before_broker,
     )
     engine = TradingEngine(
         candidate_source=_StaticCandidateSource(cutoff, candidates),
@@ -341,6 +384,20 @@ def run_current_paper_shadow_cycle(
         engine,
         shadow_evaluator=shadow_evaluator,
     ).run_cycle(cutoff)
+    if not checkpoint_paths:
+        raise RuntimeError("PAPER broker completed without persisting runtime strategy checkpoint")
+    receipt_entry_order_ids = receipt_champion_entry_order_ids(
+        batch_id=current_batch_id,
+        champion_strategy_id=result.champion.strategy_id,
+        emitted_entry_orders=result.champion.entry_orders,
+        broker=broker,
+    )
+    emitted_entry_order_ids = {
+        order.order_id for order in result.champion.entry_orders
+    }
+    recovered_entry_order_count = len(
+        set(receipt_entry_order_ids) - emitted_entry_order_ids
+    )
 
     validate_diagnostic_counts(
         decision_diagnostics,
@@ -373,9 +430,7 @@ def run_current_paper_shadow_cycle(
         selected_event_ids=tuple(selection.selected_event_ids),
         candidate_ids=tuple(candidate.candidate_id for candidate in candidates),
         champion_strategy_id=result.champion.strategy_id,
-        champion_entry_order_ids=tuple(
-            order.order_id for order in result.champion.entry_orders
-        ),
+        champion_entry_order_ids=receipt_entry_order_ids,
         shadow_strategy_ids=tuple(item.strategy_id for item in result.shadows),
     )
     # Do not publish a receipt unless every champion entry it names is already
@@ -388,6 +443,7 @@ def run_current_paper_shadow_cycle(
         **base_payload,
         "status": "completed",
         "batch_id": current_batch_id,
+        "transaction_path": str(transaction_path),
         "current_market_sync": market_sync_payload,
         "candidate_assembly": {
             "trigger_event_count": assembly.trigger_event_count,
@@ -398,6 +454,7 @@ def run_current_paper_shadow_cycle(
         },
         "runtime_strategy_state": {
             "restored_strategy_ids": list(restored_state_ids),
+            "checkpoint_paths": [str(path) for path in checkpoint_paths],
             "saved_paths": [str(path) for path in state_paths],
         },
         "decision_diagnostics_path": str(diagnostic_path),
@@ -421,6 +478,8 @@ def run_current_paper_shadow_cycle(
                 }
                 for order in result.champion.entry_orders
             ],
+            "receipt_entry_order_ids": list(receipt_entry_order_ids),
+            "recovered_entry_order_count": recovered_entry_order_count,
             "executions": [
                 {
                     "order_id": report.order_id,

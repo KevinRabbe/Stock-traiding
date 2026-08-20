@@ -1,3 +1,4 @@
+import os
 import time
 from datetime import date, datetime, timezone
 from threading import Lock
@@ -34,7 +35,10 @@ class LdaClient:
         timeout_seconds: float = 30.0,
         client: httpx.Client | None = None,
     ) -> None:
-        self.api_key = api_key.strip() if api_key else None
+        explicit_key = api_key.strip() if api_key else ""
+        environment_key = os.environ.get("LDA_API_KEY", "").strip()
+        legacy_key = os.environ.get("LDA_API_TOKEN", "").strip()
+        self.api_key = explicit_key or environment_key or legacy_key or None
         self.requests_per_minute = 120 if self.api_key else 15
         self._minimum_interval = 60.0 / self.requests_per_minute
         self._lock = Lock()

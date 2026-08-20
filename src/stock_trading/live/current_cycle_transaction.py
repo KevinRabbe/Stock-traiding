@@ -10,6 +10,7 @@ from typing import Any
 
 from stock_trading.core import as_utc
 from stock_trading.engine import OrderSide
+from stock_trading.execution.paper_batch_commit import FilePaperRuntimeBatchCommitStore
 
 from .current_cycle_receipt import (
     CurrentCycleReceipt,
@@ -130,20 +131,47 @@ def recover_submitted_batch_receipts(
     receipt_store: FileCurrentCycleReceiptStore,
     paper_ledger,
 ) -> TransactionReceiptRecoveryResult:
-    """Publish receipts for batches whose PAPER BUY submission survived a crash.
+    """Publish receipts for batches that durably crossed the PAPER broker boundary.
 
     Recovery intentionally happens before pending-event session classification. A
-    durable batch-tagged BUY proves the broker atomically saved that order. The
-    prepared transaction supplies the otherwise non-reversible event/candidate and
-    strategy identities needed to reconstruct the exact receipt on a later restart.
+    durable batch-tagged BUY proves the broker atomically saved that order. For a
+    zero-order decision, the broker writes an explicit runtime batch-commit sidecar
+    only after its execute call succeeds. The prepared transaction supplies the
+    otherwise non-reversible event/candidate and strategy identities needed to
+    reconstruct the exact receipt on a later restart.
     """
 
     transactions = transaction_store.load_all()
     state = paper_ledger.load()
+    commit_store = FilePaperRuntimeBatchCommitStore.for_ledger(paper_ledger)
+    submitted_by_id = {order.order_id: order for order in state.submitted_orders}
     recovered: list[str] = []
     for transaction in transactions:
         if receipt_store.load(transaction.batch_id) is not None:
             continue
+        broker_commit = commit_store.load(transaction.batch_id)
+        if broker_commit is not None:
+            missing_committed = sorted(
+                order_id
+                for order_id in broker_commit.submitted_order_ids
+                if order_id not in submitted_by_id
+            )
+            if missing_committed:
+                raise RuntimeError(
+                    "PAPER runtime batch commit references missing submitted orders: "
+                    f"{missing_committed}"
+                )
+            wrong_batch = sorted(
+                order_id
+                for order_id in broker_commit.submitted_order_ids
+                if submitted_by_id[order_id].metadata.get("runtime_batch_id")
+                != transaction.batch_id
+            )
+            if wrong_batch:
+                raise RuntimeError(
+                    "PAPER runtime batch commit order ownership mismatch: "
+                    f"{wrong_batch}"
+                )
         order_ids = tuple(
             sorted(
                 order.order_id
@@ -153,7 +181,7 @@ def recover_submitted_batch_receipts(
                 and order.metadata.get("runtime_batch_id") == transaction.batch_id
             )
         )
-        if not order_ids:
+        if not order_ids and broker_commit is None:
             continue
         receipt = CurrentCycleReceipt(
             batch_id=transaction.batch_id,

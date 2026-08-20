@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Iterable
 
@@ -15,6 +15,7 @@ def analyze_forward_rank_thresholds(
     *,
     runtime_dir: str | Path = "data/runtime",
     thresholds: Iterable[float] = _DEFAULT_THRESHOLDS,
+    evidence_source: str | None = None,
 ) -> dict:
     """Evaluate hypothetical rank cutoffs from immutable forward decisions.
 
@@ -23,21 +24,35 @@ def analyze_forward_rank_thresholds(
     threshold cohort only when the original strategy found an economically eligible
     ``chosen_horizon``. The hypothetical threshold then changes only the final rank
     gate, and realized performance is measured at that originally chosen horizon.
+
+    ``evidence_source`` optionally restricts the analysis to a tagged diagnostic
+    source such as ``lda_shadow``. Historical diagnostics without an explicit tag are
+    treated as ``sec_form4`` for backward-compatible provenance.
     """
 
     runtime_root = Path(runtime_dir)
     scorecard_path = runtime_root / "forward_scorecard.json"
     payload = _load_scorecard(scorecard_path)
     resolved_thresholds = _normalize_thresholds(thresholds)
+    resolved_source = evidence_source.strip() if evidence_source is not None else None
+    if evidence_source is not None and not resolved_source:
+        raise ValueError("evidence_source must not be empty when provided")
 
     observations = payload.get("observations")
     if not isinstance(observations, list):
         raise ValueError("forward scorecard observations must be a list")
 
     by_strategy: dict[str, list[tuple[dict, dict | None]]] = defaultdict(list)
+    source_counts: Counter[str] = Counter()
+    included_observation_count = 0
     for observation in observations:
         if not isinstance(observation, dict):
             raise ValueError("forward scorecard observation must be an object")
+        source = _observation_evidence_source(runtime_root, observation)
+        if resolved_source is not None and source != resolved_source:
+            continue
+        source_counts[source] += 1
+        included_observation_count += 1
         labels = observation.get("realized_labels")
         decisions = observation.get("strategy_decisions")
         if not isinstance(labels, dict) or not isinstance(decisions, list):
@@ -79,6 +94,9 @@ def analyze_forward_rank_thresholds(
         "last_completed_xnys_session": payload.get("last_completed_xnys_session"),
         "interpretation": "diagnostic_only_not_portfolio_simulation",
         "threshold_grid": list(resolved_thresholds),
+        "evidence_source_filter": resolved_source,
+        "evidence_source_counts": dict(sorted(source_counts.items())),
+        "included_observation_count": included_observation_count,
         "strategy_count": len(strategies),
         "matured_threshold_point_count": matured_threshold_points,
         "evidence_ready": matured_threshold_points > 0,
@@ -157,6 +175,34 @@ def _threshold_row(
     }
 
 
+def _observation_evidence_source(runtime_root: Path, observation: dict) -> str:
+    inline_source = str(observation.get("evidence_source") or "").strip()
+    if inline_source:
+        return inline_source
+    batch_id = str(observation.get("batch_id") or "")
+    if not batch_id.startswith("batch_"):
+        raise ValueError("forward scorecard observation has invalid batch_id")
+    path = runtime_root / "decision_diagnostics" / f"{batch_id}.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        # Scorecards created by older code and synthetic analysis fixtures do not
+        # carry source provenance. Before LDA shadow evidence existed, every live
+        # diagnostic originated from the SEC Form 4 pipeline, so SEC is the only
+        # backward-compatible default.
+        return "sec_form4"
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid decision diagnostic provenance file: {path}") from exc
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        raise ValueError(f"unsupported decision diagnostic provenance file: {path}")
+    if str(payload.get("batch_id") or "") != batch_id:
+        raise ValueError(f"decision diagnostic provenance batch mismatch: {path}")
+    source = str(payload.get("evidence_source") or "sec_form4").strip()
+    if not source:
+        raise ValueError(f"decision diagnostic evidence_source is empty: {path}")
+    return source
+
+
 def _average(labels: list[dict], key: str) -> float | None:
     if not labels:
         return None
@@ -224,10 +270,15 @@ def _main() -> None:
         default=_DEFAULT_THRESHOLDS,
         help="comma-separated rank thresholds (default: 0.50,0.60,0.70,0.80,0.90,0.95)",
     )
+    parser.add_argument(
+        "--evidence-source",
+        help="optional diagnostic provenance filter, e.g. sec_form4 or lda_shadow",
+    )
     args = parser.parse_args()
     result = analyze_forward_rank_thresholds(
         runtime_dir=args.runtime_dir,
         thresholds=args.thresholds,
+        evidence_source=args.evidence_source,
     )
     print(json.dumps(result, indent=2, sort_keys=True, allow_nan=False))
 

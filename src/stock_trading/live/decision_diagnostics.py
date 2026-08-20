@@ -340,9 +340,13 @@ class FileStrategyDecisionDiagnosticStore:
         as_of: datetime,
         target_execution_date: date,
         diagnostics: tuple[StrategyDecisionDiagnostics, ...],
+        evidence_source: str | None = None,
     ) -> Path:
         if not batch_id.startswith("batch_"):
             raise ValueError("invalid diagnostic batch_id")
+        resolved_source = evidence_source.strip() if evidence_source is not None else None
+        if evidence_source is not None and not resolved_source:
+            raise ValueError("evidence_source must not be empty when provided")
         payload = {
             "schema_version": self.SCHEMA_VERSION,
             "batch_id": batch_id,
@@ -350,6 +354,8 @@ class FileStrategyDecisionDiagnosticStore:
             "target_execution_date": target_execution_date.isoformat(),
             "strategies": diagnostics_payload(diagnostics),
         }
+        if resolved_source is not None:
+            payload["evidence_source"] = resolved_source
         path = self.root / f"{batch_id}.json"
         if path.exists():
             try:

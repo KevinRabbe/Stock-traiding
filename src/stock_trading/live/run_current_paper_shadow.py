@@ -31,6 +31,7 @@ from .current_cycle_receipt import (
     FileCurrentCycleReceiptStore,
     batch_id,
     reconcile_completed_receipts,
+    verify_receipt_paper_orders,
 )
 from .current_market import sync_pending_current_market
 from .decision_diagnostics import (
@@ -108,11 +109,16 @@ def run_current_paper_shadow_cycle(
     market_store = DuckDbMarketStore(Path(str(config["market_db"])))
     market_store.enable_read_cache(max_series=16)
     event_store = DuckDbEventStore(data_root / "normalized" / "events.duckdb")
+    ledger = FilePaperLedger(Path(str(config["paper_ledger"])), starting_cash=10_000.0)
     queue = FileCurrentEventQueue(runtime_dir / "current_event_intake.json")
     receipt_store = FileCurrentCycleReceiptStore(
         runtime_dir / "current_cycle_receipts"
     )
-    receipt_reconciliation = reconcile_completed_receipts(queue, receipt_store)
+    receipt_reconciliation = reconcile_completed_receipts(
+        queue,
+        receipt_store,
+        paper_ledger=ledger,
+    )
 
     provider = DurablePendingTriggerProvider(
         queue=queue,
@@ -144,6 +150,15 @@ def run_current_paper_shadow_cycle(
                 receipt_reconciliation.acknowledged_pending_event_count
             ),
             "matched_batch_ids": list(receipt_reconciliation.matched_batch_ids),
+            "referenced_champion_order_count": (
+                receipt_reconciliation.referenced_champion_order_count
+            ),
+            "pending_champion_order_count": (
+                receipt_reconciliation.pending_champion_order_count
+            ),
+            "completed_champion_order_count": (
+                receipt_reconciliation.completed_champion_order_count
+            ),
         },
         "stale_disposition": {
             "selected_count": stale_result.selected_count,
@@ -300,7 +315,6 @@ def run_current_paper_shadow_cycle(
     )
     portfolio_risk = PassThroughPortfolioRiskPolicy()
     price_provider = DuckDbLatestClosePriceProvider(market_store)
-    ledger = FilePaperLedger(Path(str(config["paper_ledger"])), starting_cash=10_000.0)
     broker = SessionBarPaperExecutionBroker(
         ledger,
         market_store,
@@ -364,6 +378,9 @@ def run_current_paper_shadow_cycle(
         ),
         shadow_strategy_ids=tuple(item.strategy_id for item in result.shadows),
     )
+    # Do not publish a receipt unless every champion entry it names is already
+    # durable in the PAPER ledger. The broker persists before returning from execute.
+    verify_receipt_paper_orders((receipt,), ledger)
     receipt_path = receipt_store.write(receipt)
     acknowledged = queue.acknowledge(selection.selected_event_ids)
 

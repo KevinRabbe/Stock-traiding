@@ -31,6 +31,16 @@ class CurrentCycleReceipt:
             raise ValueError("current cycle receipt contains duplicate selected event IDs")
         if len(self.candidate_ids) != len(set(self.candidate_ids)):
             raise ValueError("current cycle receipt contains duplicate candidate IDs")
+        if len(self.champion_entry_order_ids) != len(set(self.champion_entry_order_ids)):
+            raise ValueError("current cycle receipt contains duplicate champion entry order IDs")
+
+
+@dataclass(frozen=True, slots=True)
+class ReceiptPaperIntegrityResult:
+    receipt_count: int
+    referenced_champion_order_count: int
+    pending_champion_order_count: int
+    completed_champion_order_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +49,9 @@ class ReceiptReconciliationResult:
     matched_receipt_count: int
     acknowledged_pending_event_count: int
     matched_batch_ids: tuple[str, ...]
+    referenced_champion_order_count: int = 0
+    pending_champion_order_count: int = 0
+    completed_champion_order_count: int = 0
 
 
 class FileCurrentCycleReceiptStore:
@@ -125,16 +138,76 @@ class FileCurrentCycleReceiptStore:
         return self.root / f"{batch_id_value}.json"
 
 
-def reconcile_completed_receipts(queue, store: FileCurrentCycleReceiptStore) -> ReceiptReconciliationResult:
+def verify_receipt_paper_orders(
+    receipts: tuple[CurrentCycleReceipt, ...],
+    paper_ledger,
+) -> ReceiptPaperIntegrityResult:
+    """Require every receipt-referenced champion entry order to remain durable.
+
+    A current-cycle receipt is publication authority for queue reconciliation. That
+    authority is valid only while every champion entry order named by the receipt is
+    still represented by the PAPER ledger, either as a pending order or as a
+    completed execution report. This catches ledger deletion/corruption before an
+    old receipt can suppress or acknowledge SEC work.
+    """
+
+    state = paper_ledger.load()
+    pending_ids = {order.order_id for order in state.pending_orders}
+    completed_ids = {report.order_id for report in state.completed_reports}
+    referenced = 0
+    pending_count = 0
+    completed_count = 0
+
+    for receipt in receipts:
+        missing: list[str] = []
+        for order_id in receipt.champion_entry_order_ids:
+            referenced += 1
+            if order_id in pending_ids:
+                pending_count += 1
+            elif order_id in completed_ids:
+                completed_count += 1
+            else:
+                missing.append(order_id)
+        if missing:
+            raise RuntimeError(
+                "completed receipt PAPER order integrity failure for "
+                f"{receipt.batch_id}: missing champion order IDs {sorted(missing)}"
+            )
+
+    return ReceiptPaperIntegrityResult(
+        receipt_count=len(receipts),
+        referenced_champion_order_count=referenced,
+        pending_champion_order_count=pending_count,
+        completed_champion_order_count=completed_count,
+    )
+
+
+def reconcile_completed_receipts(
+    queue,
+    store: FileCurrentCycleReceiptStore,
+    *,
+    paper_ledger=None,
+) -> ReceiptReconciliationResult:
     """Finish queue acknowledgement for batches whose durable receipt already exists.
 
     Reconciliation intentionally runs before exchange-session classification. This
     prevents a crash after receipt publication but before queue acknowledgement from
     causing an already-evaluated event to be mislabeled as stale after the intended
-    market open has passed.
+    market open has passed. When a PAPER ledger is supplied, every published
+    champion order is verified before any queue acknowledgement is allowed.
     """
 
     receipts = store.load_all()
+    integrity = (
+        verify_receipt_paper_orders(receipts, paper_ledger)
+        if paper_ledger is not None
+        else ReceiptPaperIntegrityResult(
+            receipt_count=len(receipts),
+            referenced_champion_order_count=0,
+            pending_champion_order_count=0,
+            completed_champion_order_count=0,
+        )
+    )
     pending_ids = {item.event_id for item in queue.pending()}
     matched: list[str] = []
     acknowledged = 0
@@ -159,6 +232,9 @@ def reconcile_completed_receipts(queue, store: FileCurrentCycleReceiptStore) -> 
         matched_receipt_count=len(matched),
         acknowledged_pending_event_count=acknowledged,
         matched_batch_ids=tuple(matched),
+        referenced_champion_order_count=integrity.referenced_champion_order_count,
+        pending_champion_order_count=integrity.pending_champion_order_count,
+        completed_champion_order_count=integrity.completed_champion_order_count,
     )
 
 

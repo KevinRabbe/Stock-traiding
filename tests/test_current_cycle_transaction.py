@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
-from stock_trading.engine import OrderIntent, OrderSide
+from stock_trading.engine import (
+    ExecutionReport,
+    ExecutionStatus,
+    OrderIntent,
+    OrderSide,
+)
 from stock_trading.execution import FilePaperLedger, PaperLedgerState
 from stock_trading.live.current_cycle_receipt import (
     FileCurrentCycleReceiptStore,
@@ -81,7 +86,7 @@ def _queue(tmp_path, event_id: str) -> FileCurrentEventQueue:
     return queue
 
 
-def test_submitted_batch_recovers_receipt_before_later_session_classification(tmp_path) -> None:
+def test_submitted_batch_recovers_receipt_after_lifecycle_settlement(tmp_path) -> None:
     event_id = "evt-cross-session"
     transaction = _transaction(event_id)
     transaction_store = FileCurrentCycleTransactionStore(tmp_path / "transactions")
@@ -91,15 +96,23 @@ def test_submitted_batch_recovers_receipt_before_later_session_classification(tm
     order = _submitted_buy(transaction)
     ledger.save(
         PaperLedgerState(
-            cash=10_000.0,
-            pending_orders=(order,),
+            cash=9_799.8,
+            completed_reports=(
+                ExecutionReport(
+                    order_id=order.order_id,
+                    accepted=True,
+                    executed_at=datetime(2026, 8, 20, 20, 0, tzinfo=UTC),
+                    fill_price=100.0,
+                    status=ExecutionStatus.FILLED,
+                ),
+            ),
             submitted_orders=(order,),
         )
     )
     queue = _queue(tmp_path, event_id)
 
-    # Simulate a restart well after the original execution session. Recovery does
-    # not need to reclassify or reconstruct the event; it uses the prepared batch.
+    # This mirrors run_current_pipeline on a later restart: PAPER lifecycle may have
+    # already moved the queued BUY into completed reports before receipt recovery.
     recovery = recover_submitted_batch_receipts(
         transaction_store=transaction_store,
         receipt_store=receipt_store,
@@ -117,6 +130,7 @@ def test_submitted_batch_recovers_receipt_before_later_session_classification(tm
         paper_ledger=ledger,
     )
     assert reconciliation.acknowledged_pending_event_count == 1
+    assert reconciliation.completed_champion_order_count == 1
     assert queue.pending() == ()
 
 

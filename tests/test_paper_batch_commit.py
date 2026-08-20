@@ -6,6 +6,7 @@ import pytest
 
 from stock_trading.engine import ExecutionStatus, OrderIntent, OrderSide
 from stock_trading.execution import FilePaperLedger, SessionBarPaperExecutionBroker
+from stock_trading.execution.paper_batch_commit import FilePaperRuntimeBatchCommitStore
 from stock_trading.market import DuckDbMarketStore
 
 
@@ -44,6 +45,9 @@ def test_runtime_state_hook_runs_before_durable_paper_submission(tmp_path) -> No
     assert report.status is ExecutionStatus.QUEUED
     assert calls == ["state_saved"]
     assert [item.order_id for item in ledger.load().submitted_orders] == ["buy-a"]
+    commit = FilePaperRuntimeBatchCommitStore.for_ledger(ledger).load("batch_a")
+    assert commit is not None
+    assert commit.submitted_order_ids == ("buy-a",)
 
 
 def test_runtime_state_hook_failure_prevents_paper_submission(tmp_path) -> None:
@@ -67,13 +71,15 @@ def test_runtime_state_hook_failure_prevents_paper_submission(tmp_path) -> None:
     assert state.pending_orders == ()
     assert state.completed_reports == ()
     assert state.submitted_orders == ()
+    assert FilePaperRuntimeBatchCommitStore.for_ledger(ledger).load("batch_a") is None
 
 
 def test_runtime_state_hook_runs_even_when_batch_has_no_orders(tmp_path) -> None:
     pytest.importorskip("duckdb")
+    ledger = FilePaperLedger(tmp_path / "paper.json")
     calls: list[str] = []
     broker = SessionBarPaperExecutionBroker(
-        FilePaperLedger(tmp_path / "paper.json"),
+        ledger,
         DuckDbMarketStore(tmp_path / "market.duckdb"),
         runtime_batch_id="batch_a",
         before_runtime_batch_commit=lambda: calls.append("state_saved"),
@@ -81,3 +87,25 @@ def test_runtime_state_hook_runs_even_when_batch_has_no_orders(tmp_path) -> None
 
     assert broker.execute(()) == ()
     assert calls == ["state_saved"]
+    commit = FilePaperRuntimeBatchCommitStore.for_ledger(ledger).load("batch_a")
+    assert commit is not None
+    assert commit.submitted_order_ids == ()
+
+
+def test_runtime_batch_commit_is_idempotent_for_same_order_set(tmp_path) -> None:
+    pytest.importorskip("duckdb")
+    ledger = FilePaperLedger(tmp_path / "paper.json")
+    broker = SessionBarPaperExecutionBroker(
+        ledger,
+        DuckDbMarketStore(tmp_path / "market.duckdb"),
+        runtime_batch_id="batch_a",
+    )
+
+    first = broker.execute((_buy(),))[0]
+    second = broker.execute((_buy(),))[0]
+
+    assert first.status is ExecutionStatus.QUEUED
+    assert second.status is ExecutionStatus.QUEUED
+    commit = FilePaperRuntimeBatchCommitStore.for_ledger(ledger).load("batch_a")
+    assert commit is not None
+    assert commit.submitted_order_ids == ("buy-a",)

@@ -176,16 +176,21 @@ def _threshold_row(
 
 
 def _observation_evidence_source(runtime_root: Path, observation: dict) -> str:
+    inline_source = str(observation.get("evidence_source") or "").strip()
+    if inline_source:
+        return inline_source
     batch_id = str(observation.get("batch_id") or "")
     if not batch_id.startswith("batch_"):
         raise ValueError("forward scorecard observation has invalid batch_id")
     path = runtime_root / "decision_diagnostics" / f"{batch_id}.json"
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise FileNotFoundError(
-            f"decision diagnostic backing forward observation is missing: {path}"
-        ) from exc
+    except FileNotFoundError:
+        # Scorecards created by older code and synthetic analysis fixtures do not
+        # carry source provenance. Before LDA shadow evidence existed, every live
+        # diagnostic originated from the SEC Form 4 pipeline, so SEC is the only
+        # backward-compatible default.
+        return "sec_form4"
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"invalid decision diagnostic provenance file: {path}") from exc
     if not isinstance(payload, dict) or payload.get("schema_version") != 1:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime
+from typing import Callable
 
 from stock_trading.engine import OrderIntent, OrderSide
 from stock_trading.market import DuckDbMarketStore
@@ -67,8 +68,9 @@ class SessionBarPaperExecutionBroker(_PendingEntryReservationMixin, PaperExecuti
     a restart never moves an order to the restart day's bar.
 
     When ``runtime_batch_id`` is supplied, every submitted order is durably tagged
-    with that batch before the atomic ledger save. This lets a crash retry recover
-    the exact champion order set even when pending reservations suppress re-creation.
+    with that batch before the atomic ledger save. ``before_runtime_batch_commit``
+    runs after all strategy evaluations but before broker durability, so mutable
+    calibration state can be persisted before a recoverable PAPER order exists.
     """
 
     def __init__(
@@ -78,6 +80,7 @@ class SessionBarPaperExecutionBroker(_PendingEntryReservationMixin, PaperExecuti
         *,
         per_side_cost_bps: float = 10.0,
         runtime_batch_id: str | None = None,
+        before_runtime_batch_commit: Callable[[], None] | None = None,
     ) -> None:
         if runtime_batch_id is not None and not runtime_batch_id.strip():
             raise ValueError("runtime_batch_id must not be empty when provided")
@@ -85,6 +88,7 @@ class SessionBarPaperExecutionBroker(_PendingEntryReservationMixin, PaperExecuti
         self.latest_close_provider = DuckDbLatestClosePriceProvider(market_store)
         self.previous_close_provider = DuckDbPreviousClosePriceProvider(market_store)
         self.runtime_batch_id = runtime_batch_id
+        self.before_runtime_batch_commit = before_runtime_batch_commit
         super().__init__(
             ledger,
             self.latest_close_provider,
@@ -107,6 +111,8 @@ class SessionBarPaperExecutionBroker(_PendingEntryReservationMixin, PaperExecuti
                         "PAPER order_id belongs to a different runtime batch"
                     )
             tagged.append(_tag_runtime_batch(order, self.runtime_batch_id))
+        if self.before_runtime_batch_commit is not None:
+            self.before_runtime_batch_commit()
         return super().execute(tuple(tagged))
 
     def _fill(

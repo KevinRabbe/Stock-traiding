@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 
 from stock_trading.engine import OrderIntent, OrderSide
@@ -14,13 +15,21 @@ from .prices import (
 
 
 class _PendingEntryReservationMixin:
-    """Expose durable queued BUYs to portfolio allocation as reserved capacity."""
+    """Expose durable PAPER BUY state for reservation and crash recovery."""
 
     def pending_entry_orders(self) -> tuple[OrderIntent, ...]:
         state = self.ledger.load()
         return tuple(
             order
             for order in state.pending_orders
+            if order.side is OrderSide.BUY
+        )
+
+    def submitted_entry_orders(self) -> tuple[OrderIntent, ...]:
+        state = self.ledger.load()
+        return tuple(
+            order
+            for order in state.submitted_orders
             if order.side is OrderSide.BUY
         )
 
@@ -56,6 +65,10 @@ class SessionBarPaperExecutionBroker(_PendingEntryReservationMixin, PaperExecuti
     the adjusted close of their exact terminal session, matching the forward-label
     convention. The broker may learn those prices later from completed EOD data, but
     a restart never moves an order to the restart day's bar.
+
+    When ``runtime_batch_id`` is supplied, every submitted order is durably tagged
+    with that batch before the atomic ledger save. This lets a crash retry recover
+    the exact champion order set even when pending reservations suppress re-creation.
     """
 
     def __init__(
@@ -64,15 +77,28 @@ class SessionBarPaperExecutionBroker(_PendingEntryReservationMixin, PaperExecuti
         market_store: DuckDbMarketStore,
         *,
         per_side_cost_bps: float = 10.0,
+        runtime_batch_id: str | None = None,
     ) -> None:
+        if runtime_batch_id is not None and not runtime_batch_id.strip():
+            raise ValueError("runtime_batch_id must not be empty when provided")
         self.market_store = market_store
         self.latest_close_provider = DuckDbLatestClosePriceProvider(market_store)
         self.previous_close_provider = DuckDbPreviousClosePriceProvider(market_store)
+        self.runtime_batch_id = runtime_batch_id
         super().__init__(
             ledger,
             self.latest_close_provider,
             per_side_cost_bps=per_side_cost_bps,
         )
+
+    def execute(self, orders: tuple[OrderIntent, ...]):
+        if self.runtime_batch_id is None:
+            return super().execute(orders)
+        tagged = tuple(
+            _tag_runtime_batch(order, self.runtime_batch_id)
+            for order in orders
+        )
+        return super().execute(tagged)
 
     def _fill(
         self,
@@ -106,3 +132,13 @@ class SessionBarPaperExecutionBroker(_PendingEntryReservationMixin, PaperExecuti
             positions,
             mark_price_provider=self.latest_close_provider,
         )
+
+
+def _tag_runtime_batch(order: OrderIntent, batch_id: str) -> OrderIntent:
+    existing = order.metadata.get("runtime_batch_id")
+    if existing is not None and existing != batch_id:
+        raise ValueError("PAPER order already belongs to a different runtime batch")
+    return replace(
+        order,
+        metadata={**dict(order.metadata), "runtime_batch_id": batch_id},
+    )

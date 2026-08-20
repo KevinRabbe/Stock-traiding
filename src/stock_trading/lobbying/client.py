@@ -1,3 +1,4 @@
+import os
 import time
 from datetime import date, datetime, timezone
 from threading import Lock
@@ -5,6 +6,23 @@ from threading import Lock
 import httpx
 
 from stock_trading.core import RawRecord, Source, content_sha256
+
+
+class LdaApiError(RuntimeError):
+    """Source-specific LDA HTTP failure with authentication/rate-limit context."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int,
+        authenticated: bool,
+        retry_after: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.authenticated = authenticated
+        self.retry_after = retry_after
 
 
 class LdaClient:
@@ -17,7 +35,10 @@ class LdaClient:
         timeout_seconds: float = 30.0,
         client: httpx.Client | None = None,
     ) -> None:
-        self.api_key = api_key.strip() if api_key else None
+        explicit_key = api_key.strip() if api_key else ""
+        environment_key = os.environ.get("LDA_API_KEY", "").strip()
+        legacy_key = os.environ.get("LDA_API_TOKEN", "").strip()
+        self.api_key = explicit_key or environment_key or legacy_key or None
         self.requests_per_minute = 120 if self.api_key else 15
         self._minimum_interval = 60.0 / self.requests_per_minute
         self._lock = Lock()
@@ -107,7 +128,10 @@ class LdaClient:
     def _get(self, path: str, *, params: dict | None = None) -> httpx.Response:
         self._throttle()
         response = self._client.get(f"{self.BASE_URL}{path}", params=params)
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise _lda_api_error(response, authenticated=self.api_key is not None) from exc
         return response
 
     def _throttle(self) -> None:
@@ -117,3 +141,49 @@ class LdaClient:
             if wait > 0:
                 time.sleep(wait)
             self._last_request_at = time.monotonic()
+
+
+def _lda_api_error(response: httpx.Response, *, authenticated: bool) -> LdaApiError:
+    status = response.status_code
+    mode = "registered API key" if authenticated else "anonymous"
+    retry_after = response.headers.get("retry-after")
+    detail = _response_detail(response)
+
+    if status == 403 and not authenticated:
+        message = (
+            "LDA API returned 403 Forbidden for anonymous access. LDA.gov documents "
+            "anonymous API access, but it may throttle or deny a client/IP. Configure "
+            "a registered key with LDA_API_KEY and retry."
+        )
+    elif status == 403:
+        message = (
+            "LDA API returned 403 Forbidden while using a registered API key. Verify "
+            "that LDA_API_KEY is valid and active; the service may also have denied "
+            "the client/IP."
+        )
+    elif status == 429:
+        message = f"LDA API rate limit exceeded for {mode} access."
+        if retry_after:
+            message += f" Retry-After={retry_after}."
+    else:
+        message = f"LDA API returned HTTP {status} for {mode} access."
+
+    if detail:
+        message += f" Response: {detail}"
+    return LdaApiError(
+        message,
+        status_code=status,
+        authenticated=authenticated,
+        retry_after=retry_after,
+    )
+
+
+def _response_detail(response: httpx.Response, *, limit: int = 300) -> str:
+    try:
+        text = response.text
+    except Exception:  # pragma: no cover - httpx normally decodes response text
+        return ""
+    compact = " ".join(text.split())
+    if len(compact) > limit:
+        return compact[: limit - 3] + "..."
+    return compact

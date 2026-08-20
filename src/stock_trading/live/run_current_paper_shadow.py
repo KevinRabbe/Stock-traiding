@@ -336,15 +336,15 @@ def run_current_paper_shadow_cycle(
     # before the diagnostic audit is allowed to become durable.
     decision_diagnostics = diagnose_registry(loaded.registry, candidates)
 
-    state_paths: tuple[Path, ...] = ()
+    checkpoint_paths: tuple[Path, ...] = ()
 
     def persist_strategy_state_before_broker() -> None:
-        nonlocal state_paths
-        if state_paths:
+        nonlocal checkpoint_paths
+        if checkpoint_paths:
             return
-        state_paths = state_store.save_registry(
+        checkpoint_paths = state_store.save_registry_checkpoint(
             loaded.registry,
-            completed_batch_id=current_batch_id,
+            evaluated_batch_id=current_batch_id,
         )
 
     opportunity_risk = BasicOpportunityRiskPolicy(max_expected_downside=0.06)
@@ -384,8 +384,8 @@ def run_current_paper_shadow_cycle(
         engine,
         shadow_evaluator=shadow_evaluator,
     ).run_cycle(cutoff)
-    if not state_paths:
-        raise RuntimeError("PAPER broker completed without persisting runtime strategy state")
+    if not checkpoint_paths:
+        raise RuntimeError("PAPER broker completed without persisting runtime strategy checkpoint")
     receipt_entry_order_ids = receipt_champion_entry_order_ids(
         batch_id=current_batch_id,
         champion_strategy_id=result.champion.strategy_id,
@@ -419,6 +419,10 @@ def run_current_paper_shadow_cycle(
     shadow_observer = JsonlShadowAuditObserver(runtime_dir / "shadow_evaluations.jsonl")
     shadow_observer.record(cutoff, result.shadows)
 
+    state_paths = state_store.save_registry(
+        loaded.registry,
+        completed_batch_id=current_batch_id,
+    )
     receipt = CurrentCycleReceipt(
         batch_id=current_batch_id,
         completed_at=datetime.now(timezone.utc),
@@ -450,6 +454,7 @@ def run_current_paper_shadow_cycle(
         },
         "runtime_strategy_state": {
             "restored_strategy_ids": list(restored_state_ids),
+            "checkpoint_paths": [str(path) for path in checkpoint_paths],
             "saved_paths": [str(path) for path in state_paths],
         },
         "decision_diagnostics_path": str(diagnostic_path),

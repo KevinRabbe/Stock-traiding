@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Callable
 
 from stock_trading.engine import OrderIntent, OrderSide
 from stock_trading.market import DuckDbMarketStore
 
 from .paper import FilePaperLedger, PaperExecutionBroker, PaperPositionState
+from .paper_batch_commit import (
+    FilePaperRuntimeBatchCommitStore,
+    PaperRuntimeBatchCommit,
+)
 from .prices import (
     DuckDbLatestClosePriceProvider,
     DuckDbPreviousClosePriceProvider,
@@ -71,6 +75,8 @@ class SessionBarPaperExecutionBroker(_PendingEntryReservationMixin, PaperExecuti
     with that batch before the atomic ledger save. ``before_runtime_batch_commit``
     runs after all strategy evaluations but before broker durability, so mutable
     calibration state can be persisted before a recoverable PAPER order exists.
+    After the broker call succeeds, an atomic batch-commit sidecar is written even
+    when no orders were submitted, making zero-order cycles recoverable too.
     """
 
     def __init__(
@@ -89,6 +95,11 @@ class SessionBarPaperExecutionBroker(_PendingEntryReservationMixin, PaperExecuti
         self.previous_close_provider = DuckDbPreviousClosePriceProvider(market_store)
         self.runtime_batch_id = runtime_batch_id
         self.before_runtime_batch_commit = before_runtime_batch_commit
+        self.runtime_batch_commit_store = (
+            FilePaperRuntimeBatchCommitStore.for_ledger(ledger)
+            if runtime_batch_id is not None
+            else None
+        )
         super().__init__(
             ledger,
             self.latest_close_provider,
@@ -113,7 +124,18 @@ class SessionBarPaperExecutionBroker(_PendingEntryReservationMixin, PaperExecuti
             tagged.append(_tag_runtime_batch(order, self.runtime_batch_id))
         if self.before_runtime_batch_commit is not None:
             self.before_runtime_batch_commit()
-        return super().execute(tuple(tagged))
+        reports = super().execute(tuple(tagged))
+        commit_store = self.runtime_batch_commit_store
+        if commit_store is None:
+            raise RuntimeError("runtime PAPER batch commit store is not configured")
+        commit_store.write(
+            PaperRuntimeBatchCommit(
+                batch_id=self.runtime_batch_id,
+                committed_at=datetime.now(timezone.utc),
+                submitted_order_ids=tuple(sorted(order.order_id for order in tagged)),
+            )
+        )
+        return reports
 
     def _fill(
         self,

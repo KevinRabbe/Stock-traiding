@@ -23,10 +23,10 @@ class FileRuntimeStrategyStateStore:
     """Mutable forward-only calibration overlays for immutable strategy artifacts.
 
     Frozen manifests remain the authority for model weights and initial calibration.
-    This store persists only the rolling calibration state accumulated by completed
-    forward PAPER/SHADOW cycles. Each overlay is bound to the exact artifact-manifest
-    bytes; replacing an artifact therefore makes an old overlay fail closed instead
-    of silently crossing strategy generations.
+    This store persists only rolling calibration state. Normal completed-cycle saves
+    retain ``completed_batch_id``. A pre-broker checkpoint instead records
+    ``evaluated_batch_id`` so a crash can recover already-evaluated calibration
+    without falsely claiming the entire trading cycle completed.
     """
 
     def __init__(self, root: str | Path) -> None:
@@ -56,6 +56,33 @@ class FileRuntimeStrategyStateStore:
     ) -> tuple[Path, ...]:
         if not completed_batch_id.strip():
             raise ValueError("completed_batch_id must not be empty")
+        return self._save_registry(
+            registry,
+            batch_field="completed_batch_id",
+            batch_id=completed_batch_id,
+        )
+
+    def save_registry_checkpoint(
+        self,
+        registry: StrategyRegistry,
+        *,
+        evaluated_batch_id: str,
+    ) -> tuple[Path, ...]:
+        if not evaluated_batch_id.strip():
+            raise ValueError("evaluated_batch_id must not be empty")
+        return self._save_registry(
+            registry,
+            batch_field="evaluated_batch_id",
+            batch_id=evaluated_batch_id,
+        )
+
+    def _save_registry(
+        self,
+        registry: StrategyRegistry,
+        *,
+        batch_field: str,
+        batch_id: str,
+    ) -> tuple[Path, ...]:
         paths: list[Path] = []
         strategies = [registry.active()]
         strategies.extend(
@@ -68,10 +95,11 @@ class FileRuntimeStrategyStateStore:
                     f"active strategy {strategy.strategy_id} has no artifact manifest"
                 )
             paths.append(
-                self.save(
+                self._save(
                     strategy,
                     record.artifact_ref,
-                    completed_batch_id=completed_batch_id,
+                    batch_field=batch_field,
+                    batch_id=batch_id,
                 )
             )
         return tuple(paths)
@@ -100,11 +128,46 @@ class FileRuntimeStrategyStateStore:
         *,
         completed_batch_id: str,
     ) -> Path:
+        if not completed_batch_id.strip():
+            raise ValueError("completed_batch_id must not be empty")
+        return self._save(
+            strategy,
+            artifact_manifest_path,
+            batch_field="completed_batch_id",
+            batch_id=completed_batch_id,
+        )
+
+    def save_checkpoint(
+        self,
+        strategy,
+        artifact_manifest_path: str | Path,
+        *,
+        evaluated_batch_id: str,
+    ) -> Path:
+        if not evaluated_batch_id.strip():
+            raise ValueError("evaluated_batch_id must not be empty")
+        return self._save(
+            strategy,
+            artifact_manifest_path,
+            batch_field="evaluated_batch_id",
+            batch_id=evaluated_batch_id,
+        )
+
+    def _save(
+        self,
+        strategy,
+        artifact_manifest_path: str | Path,
+        *,
+        batch_field: str,
+        batch_id: str,
+    ) -> Path:
+        if batch_field not in {"completed_batch_id", "evaluated_batch_id"}:
+            raise ValueError("invalid runtime strategy checkpoint field")
         payload = {
             "schema_version": _SCHEMA_VERSION,
             "strategy_id": strategy.strategy_id,
             "artifact_manifest_sha256": _manifest_digest(artifact_manifest_path),
-            "completed_batch_id": completed_batch_id,
+            batch_field: batch_id,
             "calibration": _calibration_payload(strategy),
         }
         path = self._path(strategy.strategy_id)

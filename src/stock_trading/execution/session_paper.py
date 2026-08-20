@@ -94,11 +94,20 @@ class SessionBarPaperExecutionBroker(_PendingEntryReservationMixin, PaperExecuti
     def execute(self, orders: tuple[OrderIntent, ...]):
         if self.runtime_batch_id is None:
             return super().execute(orders)
-        tagged = tuple(
-            _tag_runtime_batch(order, self.runtime_batch_id)
-            for order in orders
-        )
-        return super().execute(tagged)
+        existing = {
+            order.order_id: order for order in self.ledger.load().submitted_orders
+        }
+        tagged: list[OrderIntent] = []
+        for order in orders:
+            previous = existing.get(order.order_id)
+            if previous is not None:
+                previous_batch = previous.metadata.get("runtime_batch_id")
+                if previous_batch is not None and previous_batch != self.runtime_batch_id:
+                    raise ValueError(
+                        "PAPER order_id belongs to a different runtime batch"
+                    )
+            tagged.append(_tag_runtime_batch(order, self.runtime_batch_id))
+        return super().execute(tuple(tagged))
 
     def _fill(
         self,

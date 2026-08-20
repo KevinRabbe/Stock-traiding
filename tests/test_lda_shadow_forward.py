@@ -63,7 +63,7 @@ class _FakeExtractor:
         assert "Specific lobbying issues" in source_text
         assert context == "US federal lobbying disclosure"
         return SemanticAnnotation(
-            topics=("government_contracts",),
+            topics=("GOVERNMENT.PROCUREMENT",),
             direction=SemanticDirection.NEUTRAL,
             novelty=0.4,
             importance=0.6,
@@ -232,9 +232,9 @@ class _FakeResolver:
     def execution_date(self, public_time: datetime) -> date:
         if public_time.date() <= date(2026, 8, 18):
             return date(2026, 8, 19)
-        if public_time.date() == date(2026, 8, 19):
-            return date(2026, 8, 20)
-        return date(2026, 8, 21)
+        if public_time.date() == date(2026, 8, 19) and public_time.hour >= 20:
+            return date(2026, 8, 21)
+        return date(2026, 8, 20)
 
 
 def test_lda_shadow_selection_keeps_current_and_separates_stale_future(tmp_path) -> None:
@@ -244,7 +244,7 @@ def test_lda_shadow_selection_keeps_current_and_separates_stale_future(tmp_path)
             pending=(
                 LdaShadowPending("evt-stale", "cmp-a", datetime(2026, 8, 18, 12, tzinfo=UTC)),
                 LdaShadowPending("evt-current", "cmp-a", datetime(2026, 8, 19, 12, tzinfo=UTC)),
-                LdaShadowPending("evt-future", "cmp-a", datetime(2026, 8, 20, 12, tzinfo=UTC)),
+                LdaShadowPending("evt-future", "cmp-a", datetime(2026, 8, 19, 21, tzinfo=UTC)),
             )
         )
     )

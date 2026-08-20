@@ -47,6 +47,7 @@ class PaperLedgerState:
     positions: tuple[PaperPositionState, ...] = ()
     pending_orders: tuple[OrderIntent, ...] = ()
     completed_reports: tuple[ExecutionReport, ...] = ()
+    submitted_orders: tuple[OrderIntent, ...] = ()
 
     def __post_init__(self) -> None:
         if self.cash < -1e-9:
@@ -62,6 +63,9 @@ class PaperLedgerState:
             raise ValueError("duplicate completed paper order_id")
         if set(pending_ids) & set(completed_ids):
             raise ValueError("paper order cannot be pending and completed")
+        submitted_ids = [item.order_id for item in self.submitted_orders]
+        if len(submitted_ids) != len(set(submitted_ids)):
+            raise ValueError("duplicate submitted paper order_id")
 
 
 class FilePaperLedger:
@@ -85,13 +89,23 @@ class FilePaperLedger:
         if not isinstance(payload, dict) or payload.get("schema_version") != self.SCHEMA_VERSION:
             raise ValueError("unsupported paper ledger schema")
         try:
+            pending_orders = tuple(
+                _order_from_json(item) for item in payload.get("pending_orders", ())
+            )
+            raw_submitted = payload.get("submitted_orders")
+            submitted_orders = (
+                tuple(_order_from_json(item) for item in raw_submitted)
+                if raw_submitted is not None
+                else pending_orders
+            )
             return PaperLedgerState(
                 cash=float(payload["cash"]),
                 positions=tuple(_position_from_json(item) for item in payload.get("positions", ())),
-                pending_orders=tuple(_order_from_json(item) for item in payload.get("pending_orders", ())),
+                pending_orders=pending_orders,
                 completed_reports=tuple(
                     _report_from_json(item) for item in payload.get("completed_reports", ())
                 ),
+                submitted_orders=submitted_orders,
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"invalid paper ledger at {self.path}") from exc
@@ -103,6 +117,7 @@ class FilePaperLedger:
             "positions": [_position_to_json(item) for item in state.positions],
             "pending_orders": [_order_to_json(item) for item in state.pending_orders],
             "completed_reports": [_report_to_json(item) for item in state.completed_reports],
+            "submitted_orders": [_order_to_json(item) for item in state.submitted_orders],
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         encoded = json.dumps(payload, indent=2, sort_keys=True, allow_nan=False)
@@ -150,10 +165,19 @@ class PaperExecutionBroker:
         positions = list(state.positions)
         pending = {order.order_id: order for order in state.pending_orders}
         completed = {report.order_id: report for report in state.completed_reports}
+        submitted = {order.order_id: order for order in state.submitted_orders}
+        for pending_order in state.pending_orders:
+            submitted.setdefault(pending_order.order_id, pending_order)
         cash = state.cash
         reports: list[ExecutionReport] = []
 
         for order in orders:
+            previous_order = submitted.get(order.order_id)
+            if previous_order is not None:
+                _validate_replayed_order(previous_order, order)
+            else:
+                submitted[order.order_id] = order
+
             previous = completed.get(order.order_id)
             if previous is not None:
                 reports.append(previous)
@@ -183,6 +207,7 @@ class PaperExecutionBroker:
                 positions=tuple(positions),
                 pending_orders=tuple(sorted(pending.values(), key=_order_sort_key)),
                 completed_reports=tuple(sorted(completed.values(), key=lambda item: item.order_id)),
+                submitted_orders=tuple(sorted(submitted.values(), key=_order_sort_key)),
             )
         )
         return tuple(reports)
@@ -194,6 +219,9 @@ class PaperExecutionBroker:
         positions = list(state.positions)
         pending = {order.order_id: order for order in state.pending_orders}
         completed = {report.order_id: report for report in state.completed_reports}
+        submitted = {order.order_id: order for order in state.submitted_orders}
+        for pending_order in state.pending_orders:
+            submitted.setdefault(pending_order.order_id, pending_order)
         cash = state.cash
         reports: list[ExecutionReport] = []
 
@@ -215,6 +243,7 @@ class PaperExecutionBroker:
                 positions=tuple(positions),
                 pending_orders=tuple(sorted(pending.values(), key=_order_sort_key)),
                 completed_reports=tuple(sorted(completed.values(), key=lambda item: item.order_id)),
+                submitted_orders=tuple(sorted(submitted.values(), key=_order_sort_key)),
             )
         )
         return tuple(reports)
@@ -440,6 +469,41 @@ def _rejected_report(order: OrderIntent, at: datetime, message: str) -> Executio
 
 def _order_sort_key(order: OrderIntent):
     return (order.execute_on or order.created_at.date(), order.created_at, order.order_id)
+
+
+def _validate_replayed_order(previous: OrderIntent, current: OrderIntent) -> None:
+    """Reject reuse of a deterministic order ID for a different economic intent.
+
+    ``created_at`` is intentionally excluded: an idempotent process retry has a new
+    wall-clock timestamp while the durable order identity must remain unchanged.
+    Metadata is also excluded because diagnostic/model annotations are not execution
+    authority; the economic order contract below is.
+    """
+
+    previous_identity = (
+        previous.strategy_id,
+        previous.candidate_id,
+        previous.event_id,
+        previous.company_id,
+        previous.security_id,
+        previous.side,
+        previous.allocation_pct,
+        previous.horizon_sessions,
+        previous.execute_on,
+    )
+    current_identity = (
+        current.strategy_id,
+        current.candidate_id,
+        current.event_id,
+        current.company_id,
+        current.security_id,
+        current.side,
+        current.allocation_pct,
+        current.horizon_sessions,
+        current.execute_on,
+    )
+    if previous_identity != current_identity:
+        raise ValueError("paper order_id was replayed with different economic intent")
 
 
 def _position_to_json(position: PaperPositionState) -> dict:

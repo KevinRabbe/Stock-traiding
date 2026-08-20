@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
+import pytest
+
 from stock_trading.engine import (
     ExecutionReport,
     ExecutionStatus,
@@ -9,6 +11,10 @@ from stock_trading.engine import (
     OrderSide,
 )
 from stock_trading.execution import FilePaperLedger, PaperLedgerState
+from stock_trading.execution.paper_batch_commit import (
+    FilePaperRuntimeBatchCommitStore,
+    PaperRuntimeBatchCommit,
+)
 from stock_trading.live.current_cycle_receipt import (
     FileCurrentCycleReceiptStore,
     batch_id,
@@ -134,7 +140,44 @@ def test_submitted_batch_recovers_receipt_after_lifecycle_settlement(tmp_path) -
     assert queue.pending() == ()
 
 
-def test_prepared_transaction_without_submitted_buy_is_not_recovered(tmp_path) -> None:
+def test_committed_zero_order_batch_recovers_receipt_and_pending_event(tmp_path) -> None:
+    event_id = "evt-zero-order"
+    transaction = _transaction(event_id)
+    transaction_store = FileCurrentCycleTransactionStore(tmp_path / "transactions")
+    transaction_store.write(transaction)
+    receipt_store = FileCurrentCycleReceiptStore(tmp_path / "receipts")
+    ledger = FilePaperLedger(tmp_path / "paper.json")
+    ledger.save(PaperLedgerState(cash=10_000.0))
+    FilePaperRuntimeBatchCommitStore.for_ledger(ledger).write(
+        PaperRuntimeBatchCommit(
+            batch_id=transaction.batch_id,
+            committed_at=datetime(2026, 8, 20, 0, 30, tzinfo=UTC),
+            submitted_order_ids=(),
+        )
+    )
+    queue = _queue(tmp_path, event_id)
+
+    recovery = recover_submitted_batch_receipts(
+        transaction_store=transaction_store,
+        receipt_store=receipt_store,
+        paper_ledger=ledger,
+    )
+
+    assert recovery.recovered_batch_ids == (transaction.batch_id,)
+    receipt = receipt_store.load(transaction.batch_id)
+    assert receipt is not None
+    assert receipt.champion_entry_order_ids == ()
+    reconciliation = reconcile_completed_receipts(
+        queue,
+        receipt_store,
+        paper_ledger=ledger,
+    )
+    assert reconciliation.acknowledged_pending_event_count == 1
+    assert reconciliation.referenced_champion_order_count == 0
+    assert queue.pending() == ()
+
+
+def test_prepared_transaction_without_submission_or_commit_is_not_recovered(tmp_path) -> None:
     transaction = _transaction("evt-not-submitted")
     transaction_store = FileCurrentCycleTransactionStore(tmp_path / "transactions")
     transaction_store.write(transaction)
@@ -149,6 +192,31 @@ def test_prepared_transaction_without_submitted_buy_is_not_recovered(tmp_path) -
     )
 
     assert result.recovered_receipt_count == 0
+    assert receipt_store.load(transaction.batch_id) is None
+
+
+def test_broker_commit_with_missing_submitted_order_fails_closed(tmp_path) -> None:
+    transaction = _transaction("evt-corrupt-commit")
+    transaction_store = FileCurrentCycleTransactionStore(tmp_path / "transactions")
+    transaction_store.write(transaction)
+    receipt_store = FileCurrentCycleReceiptStore(tmp_path / "receipts")
+    ledger = FilePaperLedger(tmp_path / "paper.json")
+    ledger.save(PaperLedgerState(cash=10_000.0))
+    FilePaperRuntimeBatchCommitStore.for_ledger(ledger).write(
+        PaperRuntimeBatchCommit(
+            batch_id=transaction.batch_id,
+            committed_at=datetime(2026, 8, 20, 0, 30, tzinfo=UTC),
+            submitted_order_ids=("missing-order",),
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="references missing submitted orders"):
+        recover_submitted_batch_receipts(
+            transaction_store=transaction_store,
+            receipt_store=receipt_store,
+            paper_ledger=ledger,
+        )
+
     assert receipt_store.load(transaction.batch_id) is None
 
 

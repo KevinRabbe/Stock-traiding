@@ -23,6 +23,7 @@ from .current_cycle_receipt import batch_id
 from .decision_diagnostics import FileStrategyDecisionDiagnosticStore, diagnose_registry
 from .forward_outcomes import refresh_forward_outcome_scorecard
 from .run_current_paper_shadow import _load_runtime_config
+from .runtime_lock import FileRuntimeLock
 from .runtime_state import load_persisted_shadow_registry
 from .runtime_strategy_state import FileRuntimeStrategyStateStore
 from .session_calendar import XnysExecutionSessionResolver
@@ -418,7 +419,50 @@ def run_current_lda_shadow(
     qwen_model: str | None = None,
     lda_api_token: str | None = None,
 ) -> dict:
-    """Collect and score live LDA disclosures with zero PAPER authority."""
+    """Collect and score live LDA disclosures under the shared runtime lock."""
+
+    runtime_root = Path(runtime_dir)
+    lock = FileRuntimeLock(runtime_root / "current_pipeline.lock")
+    if not lock.acquire():
+        return {
+            "status": "runtime_busy",
+            "authority": "shadow_only_no_paper",
+            "evidence_source": "lda_shadow",
+            "runtime_lock": {
+                "acquired": False,
+                "holder": lock.holder(),
+            },
+        }
+    try:
+        result = _run_current_lda_shadow_locked(
+            data_root=data_root,
+            experiment_dir=experiment_dir,
+            runtime_dir=runtime_root,
+            as_of=as_of,
+            initial_lookback_days=initial_lookback_days,
+            max_pages=max_pages,
+            qwen_base_url=qwen_base_url,
+            qwen_model=qwen_model,
+            lda_api_token=lda_api_token,
+        )
+        return {**result, "runtime_lock": {"acquired": True}}
+    finally:
+        lock.release()
+
+
+def _run_current_lda_shadow_locked(
+    *,
+    data_root: str | Path = "data",
+    experiment_dir: str | Path = "data/experiments/lightgbm_holdout_250_v2",
+    runtime_dir: str | Path = "data/runtime",
+    as_of: datetime | None = None,
+    initial_lookback_days: int = 2,
+    max_pages: int | None = None,
+    qwen_base_url: str | None = None,
+    qwen_model: str | None = None,
+    lda_api_token: str | None = None,
+) -> dict:
+    """Locked implementation for the measurement-only LDA forward-evidence cycle."""
 
     data_root = Path(data_root)
     experiment_dir = Path(experiment_dir)

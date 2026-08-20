@@ -132,7 +132,7 @@ class SessionBarPaperExecutionBroker(_PendingEntryReservationMixin, PaperExecuti
             PaperRuntimeBatchCommit(
                 batch_id=self.runtime_batch_id,
                 committed_at=datetime.now(timezone.utc),
-                submitted_order_ids=tuple(order.order_id for order in tagged),
+                submitted_order_ids=tuple(sorted(order.order_id for order in tagged)),
             )
         )
         return reports

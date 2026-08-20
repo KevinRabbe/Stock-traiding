@@ -1,4 +1,4 @@
-from .client import LdaClient
+from .client import LdaApiError, LdaClient
 from .normalize import LdaFilingNormalizer
 
-__all__ = ["LdaClient", "LdaFilingNormalizer"]
+__all__ = ["LdaApiError", "LdaClient", "LdaFilingNormalizer"]

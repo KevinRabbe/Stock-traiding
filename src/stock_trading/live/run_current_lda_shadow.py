@@ -325,11 +325,10 @@ def poll_current_lda_shadow(
             if client_id is None or not client_name:
                 unmapped += 1
                 continue
-            resolved = _resolve_modeled_lda_company(
+            resolved = _resolve_lda_company(
                 aliases_db=aliases_db,
                 client_id=client_id,
                 client_name=client_name,
-                modeled_ids=modeled_ids,
                 name_index=name_index,
             )
             if resolved is None:
@@ -457,9 +456,9 @@ def run_current_lda_shadow(
                 initial_lookback_days=initial_lookback_days,
                 max_pages=max_pages,
             )
-    except httpx.RequestError as exc:
+    except httpx.HTTPError as exc:
         raise RuntimeError(
-            "LDA shadow semantic enrichment requires the configured local Qwen OpenAI-compatible endpoint"
+            "LDA shadow semantic enrichment requires reachable LDA/Qwen HTTP endpoints"
         ) from exc
 
     selection = select_lda_shadow_batch(intake, resolver=resolver, as_of=cutoff)
@@ -641,7 +640,10 @@ def _sync_known_companies(
     downloaded_series = 0
     bars_added = 0
     for company_id in company_ids:
-        security_id = market_store.security_for_company(company_id, target_execution_date)
+        # Readiness is assessed only against information available through the last
+        # completed session. The PIT candidate builder later resolves the exact
+        # publication-day security mapping and remains the final mapping authority.
+        security_id = market_store.security_for_company(company_id, completed_session)
         if security_id is None:
             failures.append({"company_id": company_id, "reason": "no_verified_current_security_mapping"})
             continue
@@ -788,17 +790,19 @@ def _modeled_company_name_index(path: Path, modeled_ids: set[str]) -> dict[str, 
     return {name: tuple(sorted(ids)) for name, ids in values.items()}
 
 
-def _resolve_modeled_lda_company(
+def _resolve_lda_company(
     *,
     aliases_db: Path,
     client_id: int,
     client_name: str,
-    modeled_ids: set[str],
     name_index: dict[str, tuple[str, ...]],
 ) -> str | None:
+    # Existing aliases are higher authority than current name matching. Returning an
+    # alias even when it is outside the modeled universe lets the caller distinguish
+    # "known but not modeled" from genuinely unmapped disclosures.
     alias = _read_lda_alias(aliases_db, str(client_id))
     if alias is not None:
-        return alias if alias in modeled_ids else None
+        return alias
     matches = name_index.get(normalize_company_name(client_name), ())
     return matches[0] if len(matches) == 1 else None
 

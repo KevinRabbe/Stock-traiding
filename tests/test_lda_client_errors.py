@@ -40,6 +40,21 @@ def test_lda_client_keeps_legacy_token_environment_alias(monkeypatch) -> None:
         assert client.requests_per_minute == 120
 
 
+def test_lda_client_uses_identifiable_user_agent_and_configurable_base_url(monkeypatch) -> None:
+    monkeypatch.setenv("LDA_BASE_URL", "https://lda.senate.gov/api/v1/")
+    monkeypatch.setenv("LDA_USER_AGENT", "test-research-client/1.0")
+
+    with LdaClient() as client:
+        assert client.base_url == "https://lda.senate.gov/api/v1"
+        assert client.user_agent == "test-research-client/1.0"
+        assert client._client.headers["User-Agent"] == "test-research-client/1.0"  # noqa: SLF001
+
+
+def test_lda_client_rejects_non_https_base_url() -> None:
+    with pytest.raises(ValueError, match="https"):
+        LdaClient(base_url="http://lda.example/api/v1")
+
+
 def test_lda_anonymous_403_explains_registered_key_path(monkeypatch) -> None:
     monkeypatch.delenv("LDA_API_KEY", raising=False)
     monkeypatch.delenv("LDA_API_TOKEN", raising=False)
@@ -54,6 +69,7 @@ def test_lda_anonymous_403_explains_registered_key_path(monkeypatch) -> None:
 
     assert raised.value.status_code == 403
     assert raised.value.authenticated is False
+    assert raised.value.edge_denied is False
     assert "anonymous access" in str(raised.value)
     assert "Forbidden" in str(raised.value)
     http_client.close()
@@ -69,7 +85,29 @@ def test_lda_authenticated_403_reports_key_rejection(monkeypatch) -> None:
 
     assert raised.value.status_code == 403
     assert raised.value.authenticated is True
+    assert raised.value.edge_denied is False
     assert "valid and active" in str(raised.value)
+    http_client.close()
+
+
+def test_lda_html_access_denied_is_reported_as_edge_block(monkeypatch) -> None:
+    monkeypatch.setenv("LDA_API_KEY", "registered-key")
+    http_client = _status_client(
+        403,
+        body="<HTML><HEAD><TITLE>Access Denied</TITLE></HEAD><BODY>Access Denied</BODY></HTML>",
+        headers={"Content-Type": "text/html"},
+    )
+    client = LdaClient(client=http_client)
+
+    with pytest.raises(LdaApiError, match="edge/CDN") as raised:
+        client.fetch_filings_page(filing_year=2026)
+
+    assert raised.value.status_code == 403
+    assert raised.value.authenticated is True
+    assert raised.value.edge_denied is True
+    assert raised.value.base_url == "https://lda.gov/api/v1"
+    assert "may not have been evaluated" in str(raised.value)
+    assert "LDA_BASE_URL" in str(raised.value)
     http_client.close()
 
 

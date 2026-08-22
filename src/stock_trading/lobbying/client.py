@@ -191,9 +191,10 @@ def _lda_api_error(
         message = (
             "LDA edge/CDN returned 403 Access Denied before a normal API response. "
             "The registered API key may not have been evaluated. "
-            f"Base URL: {base_url}. The client sends an identifiable User-Agent; "
-            "if this host remains blocked, configure LDA_BASE_URL to another official "
-            "Senate LDA API hostname and retry."
+            f"Base URL: {base_url}. The client sends an identifiable User-Agent. "
+            "Do not rotate the API key solely from this response; treat a repeated "
+            "edge denial as an access/CDN condition. LDA_BASE_URL is available only "
+            "for a replacement API endpoint published by the Senate."
         )
     elif status == 403 and not authenticated:
         message = (

@@ -18,6 +18,47 @@ jobs:
       - name: Test
         run: pytest
 
+  bootstrap-lda-feed:
+    if: github.event_name == 'pull_request' && github.head_ref == 'agent/lda-feed-bootstrap-v2'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install package
+        run: python -m pip install -e .
+      - name: Build rolling official-LDA snapshot
+        run: |
+          python -m stock_trading.lobbying.relay_snapshot \
+            --output "$RUNNER_TEMP/lda_snapshot.json" \
+            --lookback-days 14
+          sha256sum "$RUNNER_TEMP/lda_snapshot.json"
+      - name: Publish bootstrap relay branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          snapshot="$RUNNER_TEMP/lda_snapshot.json"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch --orphan lda-feed-stage
+          git rm -rf .
+          git clean -fdx
+          cp "$snapshot" lda_snapshot.json
+          cat > README.md <<'EOF'
+          # LDA relay snapshot
+
+          This branch is generated from the official `https://lda.gov/api/v1` API.
+          It contains only a rolling raw-data snapshot for local networks blocked by the
+          LDA.gov edge/CDN. Strategy scoring, mapping, Qwen, and PAPER do not run here.
+          EOF
+          git add README.md lda_snapshot.json
+          git commit -m "Bootstrap LDA relay snapshot"
+          git push --force origin HEAD:lda-feed
+
   windows-package-smoke:
     runs-on: windows-latest
     steps:

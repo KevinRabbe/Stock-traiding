@@ -1,6 +1,7 @@
+import json
 import os
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from threading import Lock
 
 import httpx
@@ -29,8 +30,18 @@ class LdaApiError(RuntimeError):
         self.base_url = base_url
 
 
+class LdaRelayError(RuntimeError):
+    """The public GitHub LDA relay is unavailable, stale, or incomplete."""
+
+
 class LdaClient:
     DEFAULT_BASE_URL = "https://lda.gov/api/v1"
+    DEFAULT_RELAY_URL = (
+        "https://raw.githubusercontent.com/KevinRabbe/Stock-traiding/"
+        "lda-feed/lda_snapshot.json"
+    )
+    DEFAULT_RELAY_MAX_AGE_HOURS = 18.0
+    RELAY_SCHEMA_VERSION = 1
     DEFAULT_USER_AGENT = (
         "Stock-traiding/0.1 "
         "(+https://github.com/KevinRabbe/Stock-traiding; LDA research client)"
@@ -44,6 +55,10 @@ class LdaClient:
         user_agent: str | None = None,
         timeout_seconds: float = 30.0,
         client: httpx.Client | None = None,
+        relay_fallback: bool = True,
+        relay_url: str | None = None,
+        relay_max_age_hours: float = DEFAULT_RELAY_MAX_AGE_HOURS,
+        relay_client: httpx.Client | None = None,
     ) -> None:
         explicit_key = api_key.strip() if api_key else ""
         environment_key = os.environ.get("LDA_API_KEY", "").strip()
@@ -64,11 +79,29 @@ class LdaClient:
             raise ValueError("LDA user agent must not be empty")
         self.user_agent = resolved_user_agent
 
+        if relay_max_age_hours <= 0:
+            raise ValueError("relay_max_age_hours must be > 0")
+        self.relay_max_age_hours = float(relay_max_age_hours)
+        if relay_fallback:
+            resolved_relay_url = (
+                relay_url or os.environ.get("LDA_RELAY_URL", "") or self.DEFAULT_RELAY_URL
+            ).strip()
+            if not resolved_relay_url.startswith("https://"):
+                raise ValueError("LDA relay URL must use https://")
+            self.relay_url: str | None = resolved_relay_url
+        else:
+            self.relay_url = None
+
         self.requests_per_minute = 120 if self.api_key else 15
         self._minimum_interval = 60.0 / self.requests_per_minute
         self._lock = Lock()
         self._last_request_at = 0.0
         self._owns_client = client is None
+        self._owns_relay_client = relay_client is None
+        self._edge_blocked = False
+        self._relay_snapshot: dict | None = None
+        self.transport_mode = "direct"
+        self.relay_snapshot_generated_at: datetime | None = None
 
         headers = {
             "Accept": "application/json",
@@ -81,10 +114,22 @@ class LdaClient:
             headers=headers,
             follow_redirects=True,
         )
+        # Never reuse the LDA-authenticated client for the GitHub relay: doing so
+        # would leak the Senate API key to a different host via its default header.
+        self._relay_client = relay_client or httpx.Client(
+            timeout=timeout_seconds,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": self.user_agent,
+            },
+            follow_redirects=True,
+        )
 
     def close(self) -> None:
         if self._owns_client:
             self._client.close()
+        if self._owns_relay_client:
+            self._relay_client.close()
 
     def __enter__(self) -> "LdaClient":
         return self
@@ -154,17 +199,153 @@ class LdaClient:
         )
 
     def _get(self, path: str, *, params: dict | None = None) -> httpx.Response:
+        if self._edge_blocked and self.relay_url is not None:
+            return self._get_from_relay(path, params=params)
+
         self._throttle()
         response = self._client.get(f"{self.base_url}{path}", params=params)
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            raise _lda_api_error(
+            api_error = _lda_api_error(
                 response,
                 authenticated=self.api_key is not None,
                 base_url=self.base_url,
-            ) from exc
+            )
+            if api_error.edge_denied and self.relay_url is not None:
+                self._edge_blocked = True
+                try:
+                    return self._get_from_relay(path, params=params)
+                except Exception as relay_exc:
+                    raise LdaRelayError(
+                        "LDA direct access was edge-blocked and the GitHub relay could not "
+                        f"satisfy the request: {relay_exc}"
+                    ) from api_error
+            raise api_error from exc
+        self.transport_mode = "direct"
         return response
+
+    def _get_from_relay(self, path: str, *, params: dict | None) -> httpx.Response:
+        snapshot = self._load_relay_snapshot()
+        self.transport_mode = "relay"
+        if path == "/filings/":
+            return self._relay_filings_response(snapshot, params=params or {})
+        prefix = "/filings/"
+        suffix = "/"
+        if path.startswith(prefix) and path.endswith(suffix):
+            filing_uuid = path[len(prefix) : -len(suffix)].strip()
+            if filing_uuid:
+                for filing in snapshot["filings"]:
+                    if str(filing.get("filing_uuid") or "").strip() == filing_uuid:
+                        return self._json_response(filing, path=path)
+                raise LdaRelayError(
+                    f"filing {filing_uuid} is not present in the rolling relay snapshot"
+                )
+        raise LdaRelayError(f"relay does not support LDA path: {path}")
+
+    def _load_relay_snapshot(self) -> dict:
+        if self._relay_snapshot is not None:
+            return self._relay_snapshot
+        if self.relay_url is None:
+            raise LdaRelayError("relay fallback is disabled")
+
+        response = self._relay_client.get(self.relay_url)
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise LdaRelayError(
+                f"relay returned HTTP {response.status_code}: {self.relay_url}"
+            ) from exc
+        try:
+            payload = response.json()
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise LdaRelayError("relay response is not valid JSON") from exc
+        if not isinstance(payload, dict):
+            raise LdaRelayError("relay snapshot must be a JSON object")
+        if payload.get("schema_version") != self.RELAY_SCHEMA_VERSION:
+            raise LdaRelayError("unsupported relay snapshot schema")
+        if payload.get("source_base_url") != self.DEFAULT_BASE_URL:
+            raise LdaRelayError("relay snapshot does not identify the canonical LDA source")
+
+        generated_at = _parse_relay_timestamp(payload.get("generated_at"), "generated_at")
+        now = datetime.now(timezone.utc)
+        if generated_at > now + timedelta(minutes=5):
+            raise LdaRelayError("relay snapshot generated_at is unexpectedly in the future")
+        age_hours = (now - generated_at).total_seconds() / 3600.0
+        if age_hours > self.relay_max_age_hours:
+            raise LdaRelayError(
+                f"relay snapshot is stale ({age_hours:.1f}h old; max {self.relay_max_age_hours:.1f}h)"
+            )
+
+        try:
+            coverage_after = date.fromisoformat(str(payload["posted_after"]))
+            coverage_before = date.fromisoformat(str(payload["posted_before"]))
+        except (KeyError, ValueError) as exc:
+            raise LdaRelayError("relay snapshot has invalid date coverage") from exc
+        if coverage_after > coverage_before:
+            raise LdaRelayError("relay snapshot date coverage is inverted")
+        filings = payload.get("filings")
+        if not isinstance(filings, list) or not all(isinstance(item, dict) for item in filings):
+            raise LdaRelayError("relay snapshot filings must be a list of objects")
+        if payload.get("filing_count") != len(filings):
+            raise LdaRelayError("relay snapshot filing_count does not match filings")
+
+        self.relay_snapshot_generated_at = generated_at
+        self._relay_snapshot = payload
+        return payload
+
+    def _relay_filings_response(self, snapshot: dict, *, params: dict) -> httpx.Response:
+        try:
+            page = int(params.get("page", 1))
+            page_size = int(params.get("page_size", 25))
+        except (TypeError, ValueError) as exc:
+            raise LdaRelayError("relay pagination parameters must be integers") from exc
+        if page <= 0 or not 1 <= page_size <= 25:
+            raise LdaRelayError("relay pagination parameters are out of range")
+
+        posted_after = _date_param(params.get("filing_dt_posted_after"))
+        posted_before = _date_param(params.get("filing_dt_posted_before"))
+        filing_year_raw = params.get("filing_year")
+        filing_year = int(filing_year_raw) if filing_year_raw is not None else None
+
+        coverage_after = date.fromisoformat(str(snapshot["posted_after"]))
+        coverage_before = date.fromisoformat(str(snapshot["posted_before"]))
+        if posted_after is None or posted_before is None:
+            raise LdaRelayError(
+                "rolling relay requires both filing_dt_posted_after and filing_dt_posted_before"
+            )
+        if posted_after < coverage_after or posted_before > coverage_before:
+            raise LdaRelayError(
+                "requested LDA date range is outside relay coverage "
+                f"[{coverage_after.isoformat()}, {coverage_before.isoformat()}]"
+            )
+
+        filtered: list[dict] = []
+        for filing in snapshot["filings"]:
+            posted = _filing_posted_date(filing)
+            if posted < posted_after or posted > posted_before:
+                continue
+            if filing_year is not None and _int_or_none(filing.get("filing_year")) != filing_year:
+                continue
+            filtered.append(filing)
+
+        filtered.sort(key=lambda item: (str(item.get("dt_posted") or ""), str(item.get("filing_uuid") or "")))
+        start = (page - 1) * page_size
+        end = start + page_size
+        results = filtered[start:end]
+        has_next = end < len(filtered)
+        has_previous = page > 1 and start < len(filtered)
+        payload = {
+            "count": len(filtered),
+            "next": f"relay://filings?page={page + 1}" if has_next else None,
+            "previous": f"relay://filings?page={page - 1}" if has_previous else None,
+            "results": results,
+        }
+        return self._json_response(payload, path="/filings/")
+
+    def _json_response(self, payload: dict, *, path: str) -> httpx.Response:
+        request = httpx.Request("GET", f"https://relay.local{path}")
+        return httpx.Response(200, request=request, json=payload)
 
     def _throttle(self) -> None:
         with self._lock:
@@ -251,3 +432,39 @@ def _response_detail(response: httpx.Response, *, limit: int = 300) -> str:
     if len(compact) > limit:
         return compact[: limit - 3] + "..."
     return compact
+
+
+def _parse_relay_timestamp(value, field: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise LdaRelayError(f"relay snapshot has invalid {field}") from exc
+    if parsed.tzinfo is None:
+        raise LdaRelayError(f"relay snapshot {field} must include timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def _date_param(value) -> date | None:
+    if value is None:
+        return None
+    try:
+        return date.fromisoformat(str(value))
+    except ValueError as exc:
+        raise LdaRelayError(f"invalid relay date parameter: {value}") from exc
+
+
+def _filing_posted_date(filing: dict) -> date:
+    value = str(filing.get("dt_posted") or "").strip()
+    if not value:
+        raise LdaRelayError("relay filing is missing dt_posted")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise LdaRelayError(f"relay filing has invalid dt_posted: {value}") from exc
+    return parsed.date()
+
+
+def _int_or_none(value) -> int | None:
+    if value is None or str(value).strip() == "":
+        return None
+    return int(value)

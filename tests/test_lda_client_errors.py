@@ -97,7 +97,9 @@ def test_lda_html_access_denied_is_reported_as_edge_block(monkeypatch) -> None:
         body="<HTML><HEAD><TITLE>Access Denied</TITLE></HEAD><BODY>Access Denied</BODY></HTML>",
         headers={"Content-Type": "text/html"},
     )
-    client = LdaClient(client=http_client)
+    # This test isolates classification of the direct edge response. Production
+    # behavior with relay fallback enabled is covered in test_lda_relay.py.
+    client = LdaClient(client=http_client, relay_fallback=False)
 
     with pytest.raises(LdaApiError, match="edge/CDN") as raised:
         client.fetch_filings_page(filing_year=2026)

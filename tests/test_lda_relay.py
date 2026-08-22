@@ -5,7 +5,8 @@ import httpx
 import pytest
 
 from stock_trading.core import RawRecord, Source, content_sha256
-from stock_trading.lobbying import LdaClient, LdaRelayError
+from stock_trading.lobbying import LdaApiError, LdaClient, LdaRelayError
+import stock_trading.lobbying.relay_snapshot as relay_snapshot
 from stock_trading.lobbying.relay_snapshot import build_relay_snapshot
 
 
@@ -172,3 +173,57 @@ def test_build_relay_snapshot_aggregates_pages_deterministically() -> None:
     assert payload["pages_fetched"] == 2
     assert payload["filing_count"] == 2
     assert [item["filing_uuid"] for item in payload["filings"]] == ["a", "b"]
+
+
+class _RateLimitedSnapshotClient(_SnapshotClient):
+    def __init__(self, *, always_rate_limited: bool = False) -> None:
+        super().__init__()
+        self.attempts = 0
+        self.always_rate_limited = always_rate_limited
+
+    def fetch_filings_page(self, *, page: int, **kwargs) -> RawRecord:
+        self.attempts += 1
+        if self.always_rate_limited or self.attempts == 1:
+            raise LdaApiError(
+                "rate limited",
+                status_code=429,
+                authenticated=False,
+                retry_after="1",
+            )
+        return super().fetch_filings_page(page=page, **kwargs)
+
+
+def test_build_relay_snapshot_retries_same_page_after_429(monkeypatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(relay_snapshot.time, "sleep", sleeps.append)
+    client = _RateLimitedSnapshotClient()
+
+    payload = build_relay_snapshot(
+        client=client,
+        as_of=datetime(2026, 8, 22, 12, tzinfo=timezone.utc),
+        lookback_days=14,
+        rate_limit_retries=2,
+    )
+
+    assert payload["pages_fetched"] == 2
+    assert payload["filing_count"] == 2
+    assert client.attempts == 3  # page 1 throttle + page 1 retry + page 2
+    assert sleeps == [1.0]
+
+
+def test_build_relay_snapshot_stops_after_bounded_429_retries(monkeypatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(relay_snapshot.time, "sleep", sleeps.append)
+    client = _RateLimitedSnapshotClient(always_rate_limited=True)
+
+    with pytest.raises(LdaApiError) as raised:
+        build_relay_snapshot(
+            client=client,
+            as_of=datetime(2026, 8, 22, 12, tzinfo=timezone.utc),
+            lookback_days=14,
+            rate_limit_retries=2,
+        )
+
+    assert raised.value.status_code == 429
+    assert client.attempts == 3
+    assert sleeps == [1.0, 1.0]

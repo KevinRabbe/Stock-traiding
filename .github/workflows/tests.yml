@@ -15,6 +15,41 @@ jobs:
           cache: pip
       - name: Install
         run: python -m pip install -e ".[dev]"
+      - name: Probe official LDA API anonymously
+        shell: bash
+        run: |
+          python - <<'PY'
+          import urllib.error
+          import urllib.request
+
+          url = (
+              "https://lda.gov/api/v1/filings/"
+              "?page=1&page_size=1&filing_dt_posted_after=2026-08-20&filing_dt_posted_before=2026-08-22"
+          )
+          request = urllib.request.Request(
+              url,
+              headers={
+                  "Accept": "application/json",
+                  "User-Agent": (
+                      "Stock-traiding/0.1 "
+                      "(+https://github.com/KevinRabbe/Stock-traiding; LDA connectivity probe)"
+                  ),
+              },
+          )
+          try:
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  body = response.read(500).decode("utf-8", errors="replace")
+                  print(f"status={response.status}")
+                  print(f"content_type={response.headers.get('content-type')}")
+                  print(f"body_prefix={body}")
+          except urllib.error.HTTPError as exc:
+              body = exc.read(500).decode("utf-8", errors="replace")
+              print(f"status={exc.code}")
+              print(f"content_type={exc.headers.get('content-type')}")
+              print(f"body_prefix={body}")
+          except Exception as exc:
+              print(f"transport_error={type(exc).__name__}: {exc}")
+          PY
       - name: Test
         run: pytest
 

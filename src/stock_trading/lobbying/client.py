@@ -18,20 +18,30 @@ class LdaApiError(RuntimeError):
         status_code: int,
         authenticated: bool,
         retry_after: str | None = None,
+        edge_denied: bool = False,
+        base_url: str | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.authenticated = authenticated
         self.retry_after = retry_after
+        self.edge_denied = edge_denied
+        self.base_url = base_url
 
 
 class LdaClient:
-    BASE_URL = "https://lda.gov/api/v1"
+    DEFAULT_BASE_URL = "https://lda.gov/api/v1"
+    DEFAULT_USER_AGENT = (
+        "Stock-traiding/0.1 "
+        "(+https://github.com/KevinRabbe/Stock-traiding; LDA research client)"
+    )
 
     def __init__(
         self,
         *,
         api_key: str | None = None,
+        base_url: str | None = None,
+        user_agent: str | None = None,
         timeout_seconds: float = 30.0,
         client: httpx.Client | None = None,
     ) -> None:
@@ -39,13 +49,31 @@ class LdaClient:
         environment_key = os.environ.get("LDA_API_KEY", "").strip()
         legacy_key = os.environ.get("LDA_API_TOKEN", "").strip()
         self.api_key = explicit_key or environment_key or legacy_key or None
+
+        resolved_base_url = (
+            base_url or os.environ.get("LDA_BASE_URL", "") or self.DEFAULT_BASE_URL
+        ).strip().rstrip("/")
+        if not resolved_base_url.startswith("https://"):
+            raise ValueError("LDA base URL must use https://")
+        self.base_url = resolved_base_url
+
+        resolved_user_agent = (
+            user_agent or os.environ.get("LDA_USER_AGENT", "") or self.DEFAULT_USER_AGENT
+        ).strip()
+        if not resolved_user_agent:
+            raise ValueError("LDA user agent must not be empty")
+        self.user_agent = resolved_user_agent
+
         self.requests_per_minute = 120 if self.api_key else 15
         self._minimum_interval = 60.0 / self.requests_per_minute
         self._lock = Lock()
         self._last_request_at = 0.0
         self._owns_client = client is None
 
-        headers = {"Accept": "application/json"}
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": self.user_agent,
+        }
         if self.api_key:
             headers["Authorization"] = f"Token {self.api_key}"
         self._client = client or httpx.Client(
@@ -127,11 +155,15 @@ class LdaClient:
 
     def _get(self, path: str, *, params: dict | None = None) -> httpx.Response:
         self._throttle()
-        response = self._client.get(f"{self.BASE_URL}{path}", params=params)
+        response = self._client.get(f"{self.base_url}{path}", params=params)
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            raise _lda_api_error(response, authenticated=self.api_key is not None) from exc
+            raise _lda_api_error(
+                response,
+                authenticated=self.api_key is not None,
+                base_url=self.base_url,
+            ) from exc
         return response
 
     def _throttle(self) -> None:
@@ -143,13 +175,27 @@ class LdaClient:
             self._last_request_at = time.monotonic()
 
 
-def _lda_api_error(response: httpx.Response, *, authenticated: bool) -> LdaApiError:
+def _lda_api_error(
+    response: httpx.Response,
+    *,
+    authenticated: bool,
+    base_url: str,
+) -> LdaApiError:
     status = response.status_code
     mode = "registered API key" if authenticated else "anonymous"
     retry_after = response.headers.get("retry-after")
     detail = _response_detail(response)
+    edge_denied = _looks_like_edge_access_denied(response, detail=detail)
 
-    if status == 403 and not authenticated:
+    if status == 403 and edge_denied:
+        message = (
+            "LDA edge/CDN returned 403 Access Denied before a normal API response. "
+            "The registered API key may not have been evaluated. "
+            f"Base URL: {base_url}. The client sends an identifiable User-Agent; "
+            "if this host remains blocked, configure LDA_BASE_URL to another official "
+            "Senate LDA API hostname and retry."
+        )
+    elif status == 403 and not authenticated:
         message = (
             "LDA API returned 403 Forbidden for anonymous access. LDA.gov documents "
             "anonymous API access, but it may throttle or deny a client/IP. Configure "
@@ -175,6 +221,23 @@ def _lda_api_error(response: httpx.Response, *, authenticated: bool) -> LdaApiEr
         status_code=status,
         authenticated=authenticated,
         retry_after=retry_after,
+        edge_denied=edge_denied,
+        base_url=base_url,
+    )
+
+
+def _looks_like_edge_access_denied(
+    response: httpx.Response,
+    *,
+    detail: str,
+) -> bool:
+    if response.status_code != 403:
+        return False
+    content_type = response.headers.get("content-type", "").lower()
+    normalized = detail.lower()
+    return (
+        "access denied" in normalized
+        and ("text/html" in content_type or normalized.startswith("<html"))
     )
 
 

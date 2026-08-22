@@ -3,16 +3,18 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 from stock_trading.core import as_utc
 
-from .client import LdaClient
+from .client import LdaApiError, LdaClient
 
 RELAY_SCHEMA_VERSION = 1
 DEFAULT_LOOKBACK_DAYS = 14
+DEFAULT_RATE_LIMIT_RETRIES = 3
 
 
 def build_relay_snapshot(
@@ -20,11 +22,14 @@ def build_relay_snapshot(
     client: LdaClient,
     as_of: datetime | None = None,
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
+    rate_limit_retries: int = DEFAULT_RATE_LIMIT_RETRIES,
 ) -> dict:
     """Fetch a deterministic rolling window from the official LDA API."""
 
     if lookback_days <= 0:
         raise ValueError("lookback_days must be > 0")
+    if rate_limit_retries < 0:
+        raise ValueError("rate_limit_retries must be >= 0")
     cutoff = as_utc(as_of or datetime.now(timezone.utc))
     posted_after = cutoff.date() - timedelta(days=lookback_days)
     posted_before = cutoff.date()
@@ -33,11 +38,12 @@ def build_relay_snapshot(
     page = 1
     pages_fetched = 0
     while True:
-        raw = client.fetch_filings_page(
+        raw = _fetch_filings_page(
+            client=client,
             posted_after=posted_after,
             posted_before=posted_before,
             page=page,
-            page_size=25,
+            rate_limit_retries=rate_limit_retries,
         )
         payload = json.loads(raw.content.decode("utf-8"))
         if not isinstance(payload, dict):
@@ -73,6 +79,40 @@ def build_relay_snapshot(
         "filing_count": len(filings),
         "filings": filings,
     }
+
+
+def _fetch_filings_page(
+    *,
+    client: LdaClient,
+    posted_after: date,
+    posted_before: date,
+    page: int,
+    rate_limit_retries: int,
+):
+    retries = 0
+    while True:
+        try:
+            return client.fetch_filings_page(
+                posted_after=posted_after,
+                posted_before=posted_before,
+                page=page,
+                page_size=25,
+            )
+        except LdaApiError as exc:
+            if exc.status_code != 429 or retries >= rate_limit_retries:
+                raise
+            retries += 1
+            time.sleep(_retry_after_seconds(exc.retry_after))
+
+
+def _retry_after_seconds(value: str | None) -> float:
+    if value is None:
+        return 1.0
+    try:
+        seconds = float(value.strip())
+    except ValueError:
+        return 1.0
+    return min(max(seconds, 0.0), 60.0)
 
 
 def write_relay_snapshot(path: str | Path, payload: dict) -> None:
@@ -121,6 +161,7 @@ def main() -> None:
     )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--lookback-days", type=int, default=DEFAULT_LOOKBACK_DAYS)
+    parser.add_argument("--rate-limit-retries", type=int, default=DEFAULT_RATE_LIMIT_RETRIES)
     parser.add_argument("--as-of")
     args = parser.parse_args()
 
@@ -132,6 +173,7 @@ def main() -> None:
             client=client,
             as_of=_parse_as_of(args.as_of),
             lookback_days=args.lookback_days,
+            rate_limit_retries=args.rate_limit_retries,
         )
     write_relay_snapshot(args.output, payload)
     print(

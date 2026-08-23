@@ -226,6 +226,7 @@ class UsaSpendingShadowPollResult:
     transaction_search_pages_fetched: int
     transaction_detail_pages_fetched: int
     transaction_search_row_count: int
+    transaction_identity_filtered_row_count: int
     matched_transaction_count: int
     unmatched_transaction_count: int
     transaction_diagnostic_sample: tuple[UsaSpendingTransactionDiagnostic, ...]
@@ -312,6 +313,7 @@ def poll_current_usaspending_shadow(
     transaction_search_pages = 0
     transaction_detail_pages = 0
     transaction_search_rows = 0
+    transaction_identity_filtered_rows = 0
     matched_transactions = 0
     unmatched_transactions = 0
     transaction_sample: list[UsaSpendingTransactionDiagnostic] = []
@@ -430,8 +432,26 @@ def poll_current_usaspending_shadow(
                 tx_results = tx_search_payload.get("results")
                 if not isinstance(tx_results, list):
                     raise ValueError("USAspending transaction search response has no results list")
-                changed_rows.extend(item for item in tx_results if isinstance(item, dict))
-                transaction_search_rows += len(tx_results)
+                typed_tx_results = [item for item in tx_results if isinstance(item, dict)]
+                accepted_rows, filtered_rows = _transaction_search_rows_for_award(
+                    typed_tx_results,
+                    generated_award_id,
+                )
+                changed_rows.extend(accepted_rows)
+                transaction_search_rows += len(typed_tx_results)
+                transaction_identity_filtered_rows += len(filtered_rows)
+                for filtered in filtered_rows:
+                    _append_transaction_diagnostic(
+                        transaction_sample,
+                        award_search_id,
+                        filtered,
+                        (
+                            "different_generated_award"
+                            if str(filtered.get("generated_internal_id") or "").strip()
+                            else "missing_generated_award_identity"
+                        ),
+                        0,
+                    )
                 if not _has_next(tx_search_payload):
                     break
                 tx_page += 1
@@ -550,6 +570,7 @@ def poll_current_usaspending_shadow(
         transaction_search_pages_fetched=transaction_search_pages,
         transaction_detail_pages_fetched=transaction_detail_pages,
         transaction_search_row_count=transaction_search_rows,
+        transaction_identity_filtered_row_count=transaction_identity_filtered_rows,
         matched_transaction_count=matched_transactions,
         unmatched_transaction_count=unmatched_transactions,
         transaction_diagnostic_sample=tuple(transaction_sample),
@@ -1034,6 +1055,31 @@ def _unique_name_company(
         return None
     matches = name_index.get(normalize_company_name(value), ())
     return matches[0] if len(matches) == 1 else None
+
+
+def _transaction_search_rows_for_award(
+    rows: list[dict],
+    generated_award_id: str,
+) -> tuple[list[dict], list[dict]]:
+    """Partition transaction-search rows by exact USAspending award identity.
+
+    Display Award IDs/PIIDs can be reused beneath different parent vehicles.
+    The generated internal award ID is therefore the authority for deciding
+    whether a search row belongs to the award currently being normalized.
+    """
+
+    expected = generated_award_id.strip()
+    if not expected:
+        raise ValueError("generated_award_id must not be empty")
+    accepted: list[dict] = []
+    filtered: list[dict] = []
+    for row in rows:
+        observed = str(row.get("generated_internal_id") or "").strip()
+        if observed == expected:
+            accepted.append(row)
+        else:
+            filtered.append(row)
+    return accepted, filtered
 
 
 def _matching_transaction_ids(search_row: dict, detail_rows: list[dict]) -> list[str]:

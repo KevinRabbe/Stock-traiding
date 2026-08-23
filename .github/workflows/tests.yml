@@ -53,30 +53,3 @@ jobs:
           python -W error -m stock_trading.live.run_current_lda_shadow --help
           python -W error -m stock_trading.live.run_current_usaspending_shadow --help
           python -W error -m stock_trading.live.refresh_forward_outcomes --help
-
-  apply-usaspending-generated-identity-patch:
-    if: >-
-      (github.event_name == 'push' && github.ref == 'refs/heads/agent/usaspending-generated-award-identity') ||
-      (github.event_name == 'pull_request' && github.head_ref == 'agent/usaspending-generated-award-identity')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: agent/usaspending-generated-award-identity
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Apply exact patch and remove temporary scaffolding
-        run: |
-          python .github/usaspending_identity_patch.py
-          git checkout origin/main -- .github/workflows/tests.yml
-          rm .github/usaspending_identity_patch.py
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -- src/stock_trading/live/run_current_usaspending_shadow.py tests/test_usaspending_shadow_forward.py .github/workflows/tests.yml
-          git add -u -- .github/usaspending_identity_patch.py
-          git commit -m "Require generated award identity for transactions"
-          git push origin HEAD:agent/usaspending-generated-award-identity

@@ -8,6 +8,7 @@ from pathlib import Path
 from stock_trading.core import Event, Source
 from stock_trading.entities import DuckDbExternalEntityAliases, ExternalEntityAlias
 from stock_trading.extraction import FileSemanticCache, QwenSemanticExtractor
+from stock_trading.extraction.qwen import DEFAULT_QWEN_BASE_URL, DEFAULT_QWEN_MODEL
 from stock_trading.lobbying import LdaClient, LdaFilingNormalizer
 from stock_trading.market import normalize_company_name
 from stock_trading.storage import DuckDbEventStore, FileRawStore
@@ -19,8 +20,8 @@ class LdaEnrichmentConfig:
     start_year: int = 2012
     end_year: int | None = None
     max_pages_per_year: int | None = None
-    qwen_base_url: str = "http://127.0.0.1:8000/v1"
-    qwen_model: str = "Qwen/Qwen3.5-4B"
+    qwen_base_url: str = DEFAULT_QWEN_BASE_URL
+    qwen_model: str = DEFAULT_QWEN_MODEL
     qwen_extractor_version: str = "semantic-v1"
 
 
@@ -270,11 +271,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-pages-per-year", type=int)
     parser.add_argument(
         "--qwen-base-url",
-        default=os.environ.get("QWEN_BASE_URL", "http://127.0.0.1:8000/v1"),
+        default=os.environ.get("QWEN_BASE_URL", DEFAULT_QWEN_BASE_URL),
     )
     parser.add_argument(
         "--qwen-model",
-        default=os.environ.get("QWEN_MODEL", "Qwen/Qwen3.5-4B"),
+        default=os.environ.get("QWEN_MODEL", DEFAULT_QWEN_MODEL),
     )
     return parser
 

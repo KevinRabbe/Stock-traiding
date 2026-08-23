@@ -79,6 +79,7 @@ class UsaSpendingNormalizer:
         award: AwardContext,
         observed_at: datetime,
         company_ids_by_uei: dict[str, str] | None = None,
+        selected_transaction_ids: set[str] | frozenset[str] | None = None,
     ) -> tuple[Event, ...]:
         self._require_source(transactions_raw)
         public_time = as_utc(observed_at)
@@ -87,15 +88,21 @@ class UsaSpendingNormalizer:
         if not isinstance(results, list):
             raise ValueError("USAspending transactions response has no results list")
 
-        company_map = {key.strip(): value for key, value in (company_ids_by_uei or {}).items()}
+        company_map = {key.strip().upper(): value for key, value in (company_ids_by_uei or {}).items()}
         company_id = None
         matched_uei = None
         for uei in (award.recipient_uei, award.parent_recipient_uei):
-            if uei and uei in company_map:
-                company_id = company_map[uei]
-                matched_uei = uei
+            normalized_uei = uei.strip().upper() if uei else None
+            if normalized_uei and normalized_uei in company_map:
+                company_id = company_map[normalized_uei]
+                matched_uei = normalized_uei
                 break
         actor_uei = matched_uei or award.recipient_uei or award.parent_recipient_uei
+        selected = (
+            {str(item).strip() for item in selected_transaction_ids if str(item).strip()}
+            if selected_transaction_ids is not None
+            else None
+        )
 
         events: list[Event] = []
         for row in results:
@@ -104,6 +111,8 @@ class UsaSpendingNormalizer:
             transaction_id = str(row.get("id") or "").strip()
             action_date_text = str(row.get("action_date") or "").strip()
             if not transaction_id or not action_date_text:
+                continue
+            if selected is not None and transaction_id not in selected:
                 continue
 
             action_date = datetime.strptime(action_date_text[:10], "%Y-%m-%d").date()

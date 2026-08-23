@@ -4,29 +4,7 @@ on:
   push:
   pull_request:
 
-permissions:
-  contents: write
-
 jobs:
-  apply-usaspending-resilience-patch:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/agent/usaspending-detail-resilience'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Apply and clean patch helper
-        run: |
-          python .github/patch_usaspending_resilience.py
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git show origin/main:.github/workflows/tests.yml > .github/workflows/tests.yml
-          rm .github/patch_usaspending_resilience.py
-          git add -- src/stock_trading/live/run_current_usaspending_shadow.py .github/workflows/tests.yml
-          git add -u -- .github/patch_usaspending_resilience.py
-          git commit -m "Tighten USAspending recipient prefilter"
-          git push origin HEAD:agent/usaspending-detail-resilience
-
   pytest:
     runs-on: ubuntu-latest
     steps:

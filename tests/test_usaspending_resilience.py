@@ -25,7 +25,7 @@ def test_usaspending_client_retries_transient_server_error() -> None:
     raw = client.fetch_award("award-1")
 
     assert calls == 3
-    assert b"award-1" in raw.content_bytes
+    assert b"award-1" in raw.content
 
 
 def test_usaspending_client_fails_closed_after_bounded_retries() -> None:

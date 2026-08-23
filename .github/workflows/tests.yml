@@ -50,3 +50,69 @@ jobs:
           python -W error -m stock_trading.live.diagnose_current_receipt --help
           python -W error -m stock_trading.live.run_current_pipeline --help
           python -W error -m stock_trading.live.refresh_forward_outcomes --help
+
+  apply-ollama-qwen-defaults:
+    if: github.event_name == 'pull_request' && github.head_ref == 'agent/ollama-qwen-defaults-stage'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+      - name: Apply exact product patch
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          qwen_path = Path('src/stock_trading/extraction/qwen.py')
+          qwen = qwen_path.read_text(encoding='utf-8')
+          marker = 'from .semantic import ALLOWED_TOPICS, SemanticResult\n\n\nclass FileSemanticCache:'
+          replacement = (
+              'from .semantic import ALLOWED_TOPICS, SemanticResult\n\n\n'
+              'DEFAULT_QWEN_BASE_URL = "http://127.0.0.1:11434/v1"\n'
+              'DEFAULT_QWEN_MODEL = "qwen3.5:4b-q8_0"\n\n\n'
+              'class FileSemanticCache:'
+          )
+          assert qwen.count(marker) == 1
+          qwen = qwen.replace(marker, replacement)
+          old_signature = (
+              '        base_url: str = "http://127.0.0.1:8000/v1",\n'
+              '        model: str = "Qwen/Qwen3.5-4B",'
+          )
+          new_signature = (
+              '        base_url: str = DEFAULT_QWEN_BASE_URL,\n'
+              '        model: str = DEFAULT_QWEN_MODEL,'
+          )
+          assert qwen.count(old_signature) == 1
+          qwen = qwen.replace(old_signature, new_signature)
+          qwen_path.write_text(qwen, encoding='utf-8')
+
+          runner_path = Path('src/stock_trading/live/run_current_lda_shadow.py')
+          runner = runner_path.read_text(encoding='utf-8')
+          import_marker = 'from stock_trading.extraction import FileSemanticCache, QwenSemanticExtractor\n'
+          import_replacement = (
+              'from stock_trading.extraction import FileSemanticCache, QwenSemanticExtractor\n'
+              'from stock_trading.extraction.qwen import DEFAULT_QWEN_BASE_URL, DEFAULT_QWEN_MODEL\n'
+          )
+          assert runner.count(import_marker) == 1
+          runner = runner.replace(import_marker, import_replacement)
+          assert runner.count('"http://127.0.0.1:8000/v1"') == 2
+          assert runner.count('"Qwen/Qwen3.5-4B"') == 2
+          runner = runner.replace('"http://127.0.0.1:8000/v1"', 'DEFAULT_QWEN_BASE_URL')
+          runner = runner.replace('"Qwen/Qwen3.5-4B"', 'DEFAULT_QWEN_MODEL')
+          runner_path.write_text(runner, encoding='utf-8')
+
+          test_path = Path('tests/test_qwen_runtime_defaults.py')
+          test_path.write_text('''from stock_trading.extraction import FileSemanticCache, QwenSemanticExtractor\nfrom stock_trading.extraction.qwen import DEFAULT_QWEN_BASE_URL, DEFAULT_QWEN_MODEL\nfrom stock_trading.live.run_current_lda_shadow import (\n    DEFAULT_QWEN_BASE_URL as LDA_DEFAULT_QWEN_BASE_URL,\n    DEFAULT_QWEN_MODEL as LDA_DEFAULT_QWEN_MODEL,\n)\n\n\ndef test_qwen_defaults_match_validated_ollama_runtime(tmp_path) -> None:\n    extractor = QwenSemanticExtractor(cache=FileSemanticCache(tmp_path), client=object())  # type: ignore[arg-type]\n    assert DEFAULT_QWEN_BASE_URL == "http://127.0.0.1:11434/v1"\n    assert DEFAULT_QWEN_MODEL == "qwen3.5:4b-q8_0"\n    assert extractor.base_url == DEFAULT_QWEN_BASE_URL\n    assert extractor.model == DEFAULT_QWEN_MODEL\n    assert LDA_DEFAULT_QWEN_BASE_URL == DEFAULT_QWEN_BASE_URL\n    assert LDA_DEFAULT_QWEN_MODEL == DEFAULT_QWEN_MODEL\n''', encoding='utf-8')
+          PY
+      - name: Commit staged product files
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/stock_trading/extraction/qwen.py src/stock_trading/live/run_current_lda_shadow.py tests/test_qwen_runtime_defaults.py
+          git diff --cached --check
+          git commit -m "Use validated Ollama Qwen runtime defaults"
+          git push origin HEAD:${{ github.head_ref }}

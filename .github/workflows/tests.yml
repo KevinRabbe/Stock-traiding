@@ -72,14 +72,14 @@ jobs:
 
           with UsaSpendingClient() as client:
               raw = client.search_contract_awards_page(
-                  modified_after=date(2026, 8, 22),
+                  modified_after=date(2026, 8, 17),
                   modified_before=date(2026, 8, 23),
                   page=1,
                   limit=5,
               )
               payload = json.loads(raw.content)
               results = payload.get("results") or []
-              assert results, "live USAspending contract search returned no rows"
+              assert results, "live USAspending contract search returned no rows for prior week"
               row = results[0]
               print("award_search_keys=", sorted(row))
               award_id = str(row["Award ID"])
@@ -89,7 +89,7 @@ jobs:
               assert detail_payload.get("generated_unique_award_id") == generated
               tx = client.search_contract_transactions_page(
                   award_id,
-                  modified_after=date(2026, 8, 22),
+                  modified_after=date(2026, 8, 17),
                   modified_before=date(2026, 8, 23),
                   page=1,
                   limit=5,

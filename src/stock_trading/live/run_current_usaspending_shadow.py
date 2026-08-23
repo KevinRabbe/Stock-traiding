@@ -418,6 +418,7 @@ def poll_current_usaspending_shadow(
             while True:
                 tx_search_raw = usaspending_client.search_contract_transactions_page(
                     award_search_id,
+                    generated_award_id=generated_award_id,
                     modified_after=modified_after,
                     modified_before=modified_before,
                     page=tx_page,

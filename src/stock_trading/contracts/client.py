@@ -119,6 +119,7 @@ class UsaSpendingClient:
         self,
         award_search_id: str,
         *,
+        generated_award_id: str,
         modified_after: date,
         modified_before: date,
         page: int = 1,
@@ -127,8 +128,11 @@ class UsaSpendingClient:
         """Discover changed transactions for one award display ID from search results."""
 
         normalized = award_search_id.strip()
+        normalized_generated = generated_award_id.strip()
         if not normalized:
             raise ValueError("award_search_id must not be empty")
+        if not normalized_generated:
+            raise ValueError("generated_award_id must not be empty")
         self._validate_search_window(modified_after, modified_before, page=page, limit=limit)
         response = self._request_with_retry(
             "POST",
@@ -137,6 +141,7 @@ class UsaSpendingClient:
                 "filters": {
                     "award_type_codes": list(CONTRACT_TYPE_CODES),
                     "award_ids": [normalized],
+                    "award_unique_id": normalized_generated,
                     "time_period": [
                         {
                             "start_date": modified_after.isoformat(),

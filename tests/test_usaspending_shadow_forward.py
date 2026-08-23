@@ -229,6 +229,7 @@ def test_contract_search_client_uses_last_modified_and_documented_award_filter()
     )
     client.search_contract_transactions_page(
         "W91TEST-26-C-0001",
+        generated_award_id="CONT_AWD_TEST_9700_-NONE-_-NONE-",
         modified_after=date(2026, 8, 22),
         modified_before=date(2026, 8, 23),
     )
@@ -247,7 +248,7 @@ def test_contract_search_client_uses_last_modified_and_documented_award_filter()
 
     transactions = json.loads(requests[1].content)
     assert transactions["filters"]["award_ids"] == ["W91TEST-26-C-0001"]
-    assert "award_unique_id" not in transactions["filters"]
+    assert transactions["filters"]["award_unique_id"] == "CONT_AWD_TEST_9700_-NONE-_-NONE-"
     assert transactions["filters"]["time_period"][0]["date_type"] == "last_modified_date"
 
 

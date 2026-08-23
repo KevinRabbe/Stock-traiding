@@ -105,25 +105,25 @@ class UsaSpendingClient:
 
     def search_contract_transactions_page(
         self,
-        award_id: str,
+        award_search_id: str,
         *,
         modified_after: date,
         modified_before: date,
         page: int = 1,
         limit: int = 100,
     ) -> RawRecord:
-        """Discover the transactions changed for one already-selected contract award."""
+        """Discover changed transactions for one award display ID from search results."""
 
-        normalized = award_id.strip()
+        normalized = award_search_id.strip()
         if not normalized:
-            raise ValueError("award_id must not be empty")
+            raise ValueError("award_search_id must not be empty")
         self._validate_search_window(modified_after, modified_before, page=page, limit=limit)
         response = self._client.post(
             f"{self.BASE_URL}/search/spending_by_transaction/",
             json={
                 "filters": {
                     "award_type_codes": list(CONTRACT_TYPE_CODES),
-                    "award_unique_id": normalized,
+                    "award_ids": [normalized],
                     "time_period": [
                         {
                             "start_date": modified_after.isoformat(),

@@ -38,6 +38,7 @@ jobs:
         shell: pwsh
         run: |
           python -W error -m stock_trading.experiments.prepare --help
+          python -W error -m stock_trading.experiments.enrich --help
           python -W error -m stock_trading.experiments.lightgbm_strategy_factory_executable_maturity --help
           python -W error -m stock_trading.experiments.lightgbm_strategy_qualify_executable_maturity --help
           python -W error -m stock_trading.experiments.lightgbm_strategy_freeze_executable_maturity --help
@@ -49,4 +50,6 @@ jobs:
           python -W error -m stock_trading.live.run_current_paper_shadow --help
           python -W error -m stock_trading.live.diagnose_current_receipt --help
           python -W error -m stock_trading.live.run_current_pipeline --help
+          python -W error -m stock_trading.live.run_current_lda_shadow --help
+          python -W error -m stock_trading.live.run_current_usaspending_shadow --help
           python -W error -m stock_trading.live.refresh_forward_outcomes --help

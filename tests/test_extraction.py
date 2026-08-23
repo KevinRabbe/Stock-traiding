@@ -5,6 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from stock_trading.extraction import FileSemanticCache, QwenSemanticExtractor, SemanticResult
+from stock_trading.extraction.qwen import DEFAULT_QWEN_MODEL
 
 
 def test_semantic_schema_rejects_uncontrolled_topics() -> None:
@@ -27,7 +28,7 @@ def test_qwen_extraction_is_validated_and_cached(tmp_path) -> None:
         nonlocal calls
         calls += 1
         body = json.loads(request.content)
-        assert body["model"] == "Qwen/Qwen3.5-4B"
+        assert body["model"] == DEFAULT_QWEN_MODEL
         assert body["temperature"] == 0
         result = {
             "topics": ["DEFENSE.MISSILES", "GOVERNMENT.PROCUREMENT"],
@@ -61,7 +62,7 @@ def test_qwen_extraction_is_validated_and_cached(tmp_path) -> None:
     assert calls == 1
     assert first == second
     assert first.importance == 0.9
-    assert first.model == "Qwen/Qwen3.5-4B"
+    assert first.model == DEFAULT_QWEN_MODEL
     assert first.extractor_version == "semantic-v1"
 
 

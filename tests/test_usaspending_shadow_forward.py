@@ -12,6 +12,7 @@ from stock_trading.core import RawRecord, SemanticAnnotation, SemanticDirection,
 from stock_trading.live.run_current_usaspending_shadow import (
     FileUsaSpendingShadowIntake,
     _matching_transaction_ids,
+    _transaction_search_rows_for_award,
     poll_current_usaspending_shadow,
 )
 from stock_trading.storage import DuckDbEventStore
@@ -186,6 +187,31 @@ class _FakeUsaSpendingClient:
         )
 
 
+def test_transaction_search_rows_require_exact_generated_award_identity() -> None:
+    matching = {
+        "Award ID": "75F40125F19008",
+        "Mod": "P00002",
+        "generated_internal_id": "CONT_AWD_TARGET",
+    }
+    foreign = {
+        "Award ID": "75F40125F19008",
+        "Mod": "P00001",
+        "generated_internal_id": "CONT_AWD_OTHER_PARENT",
+    }
+    missing = {
+        "Award ID": "75F40125F19008",
+        "Mod": "P00003",
+    }
+
+    accepted, filtered = _transaction_search_rows_for_award(
+        [matching, foreign, missing],
+        "CONT_AWD_TARGET",
+    )
+
+    assert accepted == [matching]
+    assert filtered == [foreign, missing]
+
+
 def test_contract_search_client_uses_last_modified_and_documented_award_filter() -> None:
     requests: list[httpx.Request] = []
 
@@ -203,6 +229,7 @@ def test_contract_search_client_uses_last_modified_and_documented_award_filter()
     )
     client.search_contract_transactions_page(
         "W91TEST-26-C-0001",
+        generated_award_id="CONT_AWD_TEST_9700_-NONE-_-NONE-",
         modified_after=date(2026, 8, 22),
         modified_before=date(2026, 8, 23),
     )
@@ -221,7 +248,7 @@ def test_contract_search_client_uses_last_modified_and_documented_award_filter()
 
     transactions = json.loads(requests[1].content)
     assert transactions["filters"]["award_ids"] == ["W91TEST-26-C-0001"]
-    assert "award_unique_id" not in transactions["filters"]
+    assert transactions["filters"]["award_unique_id"] == "CONT_AWD_TEST_9700_-NONE-_-NONE-"
     assert transactions["filters"]["time_period"][0]["date_type"] == "last_modified_date"
 
 
@@ -257,6 +284,7 @@ def test_usaspending_shadow_maps_explicit_parent_and_isolated_qwen(tmp_path) -> 
     assert result.candidate_award_count == 1
     assert result.mapped_award_count == 1
     assert result.transaction_search_row_count == 1
+    assert result.transaction_identity_filtered_row_count == 0
     assert result.matched_transaction_count == 1
     assert result.unmatched_transaction_count == 0
     assert result.mapped_event_count == 1

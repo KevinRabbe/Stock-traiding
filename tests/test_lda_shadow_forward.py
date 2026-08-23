@@ -25,6 +25,7 @@ from stock_trading.live.run_current_lda_shadow import (
     FileLdaShadowIntake,
     LdaShadowIntakeState,
     LdaShadowPending,
+    LdaUnmappedFilingDiagnostic,
     poll_current_lda_shadow,
     select_lda_shadow_batch,
 )
@@ -162,6 +163,15 @@ def test_lda_shadow_poll_is_isolated_semantic_and_idempotent(tmp_path) -> None:
     assert first.mapped_event_count == 1
     assert first.semantic_enriched_event_count == 1
     assert first.unmapped_filing_count == 1
+    assert first.unmapped_filing_sample == (
+        LdaUnmappedFilingDiagnostic(
+            filing_uuid="filing-unmapped",
+            posted_at=datetime(2026, 8, 19, 19, 0, tzinfo=UTC),
+            client_id=202,
+            client_name="Unknown Private Client",
+            reason="unresolved_company",
+        ),
+    )
     assert first.pending_events_added == 1
     assert first.pending_event_count == 1
     assert extractor.calls == 1
@@ -187,6 +197,44 @@ def test_lda_shadow_poll_is_isolated_semantic_and_idempotent(tmp_path) -> None:
     assert second.pending_event_count == 1
     assert extractor.calls == 1
     assert authoritative.count() == 0
+
+
+def test_lda_shadow_unmapped_diagnostic_sample_is_bounded(tmp_path) -> None:
+    pytest.importorskip("duckdb")
+    data_root = tmp_path / "data"
+    runtime_dir = data_root / "runtime"
+    experiment_dir = data_root / "experiments" / "model"
+    _seed_modeled_identity(data_root, experiment_dir)
+    page = {
+        "results": [
+            _filing(
+                f"filing-unmapped-{index:02d}",
+                "2026-08-19T19:00:00+00:00",
+                client_id=1000 + index,
+                client_name=f"Unknown Client {index:02d}",
+            )
+            for index in range(12)
+        ],
+        "next": None,
+    }
+    extractor = _FakeExtractor()
+
+    result = poll_current_lda_shadow(
+        data_root=data_root,
+        experiment_dir=experiment_dir,
+        runtime_dir=runtime_dir,
+        lda_client=_FakeLdaClient([page]),  # type: ignore[arg-type]
+        extractor=extractor,  # type: ignore[arg-type]
+        as_of=datetime(2026, 8, 20, 2, 0, tzinfo=UTC),
+    )
+
+    assert result.unmapped_filing_count == 12
+    assert len(result.unmapped_filing_sample) == 10
+    assert result.unmapped_filing_sample[0].filing_uuid == "filing-unmapped-00"
+    assert result.unmapped_filing_sample[-1].filing_uuid == "filing-unmapped-09"
+    assert all(item.reason == "unresolved_company" for item in result.unmapped_filing_sample)
+    assert result.mapped_event_count == 0
+    assert extractor.calls == 0
 
 
 def test_lda_shadow_truncated_pagination_does_not_advance_cursor(tmp_path) -> None:

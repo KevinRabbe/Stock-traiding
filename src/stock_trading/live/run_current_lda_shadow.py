@@ -213,6 +213,25 @@ class FileLdaShadowIntake:
 
 
 @dataclass(frozen=True, slots=True)
+class LdaUnmappedFilingDiagnostic:
+    filing_uuid: str
+    posted_at: datetime
+    client_id: int | None
+    client_name: str
+    reason: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "posted_at", as_utc(self.posted_at))
+        if not self.filing_uuid.strip():
+            raise ValueError("unmapped LDA filing diagnostic requires filing_uuid")
+        if self.reason not in {"invalid_client_object", "missing_client_identity", "unresolved_company"}:
+            raise ValueError(f"unsupported unmapped LDA filing reason: {self.reason}")
+
+
+LDA_UNMAPPED_DIAGNOSTIC_LIMIT = 10
+
+
+@dataclass(frozen=True, slots=True)
 class LdaShadowPollResult:
     pages_fetched: int
     filings_seen: int
@@ -220,6 +239,7 @@ class LdaShadowPollResult:
     mapped_event_count: int
     semantic_enriched_event_count: int
     unmapped_filing_count: int
+    unmapped_filing_sample: tuple[LdaUnmappedFilingDiagnostic, ...]
     nonmodeled_filing_count: int
     pending_events_added: int
     pending_event_count: int
@@ -281,8 +301,28 @@ def poll_current_lda_shadow(
     filings_seen = 0
     new_filings_seen = 0
     unmapped = 0
+    unmapped_sample: list[LdaUnmappedFilingDiagnostic] = []
     nonmodeled = 0
     enriched: list[Event] = []
+
+    def record_unmapped(
+        cursor: LdaFilingCursor,
+        *,
+        client_id: int | None,
+        client_name: str,
+        reason: str,
+    ) -> None:
+        if len(unmapped_sample) >= LDA_UNMAPPED_DIAGNOSTIC_LIMIT:
+            return
+        unmapped_sample.append(
+            LdaUnmappedFilingDiagnostic(
+                filing_uuid=cursor.filing_uuid,
+                posted_at=cursor.posted_at,
+                client_id=client_id,
+                client_name=client_name,
+                reason=reason,
+            )
+        )
     max_cursor = previous_cursor
     page = 1
     while True:
@@ -320,11 +360,23 @@ def poll_current_lda_shadow(
             client = filing.get("client") or {}
             if not isinstance(client, dict):
                 unmapped += 1
+                record_unmapped(
+                    cursor,
+                    client_id=None,
+                    client_name="",
+                    reason="invalid_client_object",
+                )
                 continue
             client_id = _int_or_none(client.get("id"))
             client_name = str(client.get("name") or "").strip()
             if client_id is None or not client_name:
                 unmapped += 1
+                record_unmapped(
+                    cursor,
+                    client_id=client_id,
+                    client_name=client_name,
+                    reason="missing_client_identity",
+                )
                 continue
             resolved = _resolve_lda_company(
                 aliases_db=aliases_db,
@@ -334,6 +386,12 @@ def poll_current_lda_shadow(
             )
             if resolved is None:
                 unmapped += 1
+                record_unmapped(
+                    cursor,
+                    client_id=client_id,
+                    client_name=client_name,
+                    reason="unresolved_company",
+                )
                 continue
             if resolved not in modeled_ids:
                 nonmodeled += 1
@@ -373,6 +431,7 @@ def poll_current_lda_shadow(
         mapped_event_count=len(enriched),
         semantic_enriched_event_count=sum(item.semantic is not None for item in enriched),
         unmapped_filing_count=unmapped,
+        unmapped_filing_sample=tuple(unmapped_sample),
         nonmodeled_filing_count=nonmodeled,
         pending_events_added=pending_added,
         pending_event_count=len(final_state.pending),

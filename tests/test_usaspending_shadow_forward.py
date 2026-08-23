@@ -288,6 +288,22 @@ def test_usaspending_shadow_maps_explicit_parent_and_isolated_qwen(tmp_path) -> 
     assert result.matched_transaction_count == 1
     assert result.unmatched_transaction_count == 0
     assert result.mapped_event_count == 1
+    assert len(result.recent_mapped_event_sample) == 1
+    mapped = result.recent_mapped_event_sample[0]
+    assert mapped.company_id == "cmp_microsoft"
+    assert mapped.modeled_company_name == "MICROSOFT CORPORATION"
+    assert mapped.recipient_name == "Microsoft Federal LLC"
+    assert mapped.award_id == "CONT_AWD_TEST_9700_-NONE-_-NONE-"
+    assert mapped.transaction_id == "CONT_TX_TEST_1"
+    assert mapped.action_date == "2026-08-22"
+    assert mapped.modification_number == "P00001"
+    assert mapped.obligation_amount == "250000"
+    assert mapped.agency == "Department of Defense"
+    assert mapped.semantic_topics == ("GOVERNMENT.PROCUREMENT",)
+    assert mapped.semantic_direction == "positive"
+    assert mapped.semantic_importance == 0.8
+    assert mapped.semantic_company_relevance == 0.95
+    assert mapped.semantic_confidence == 0.95
     assert result.semantic_enriched_event_count == 1
     assert result.pending_events_added == 1
     assert extractor.calls == 1
@@ -320,6 +336,8 @@ def test_usaspending_shadow_maps_explicit_parent_and_isolated_qwen(tmp_path) -> 
     assert second.pending_events_added == 0
     assert second.pending_event_count == 1
     assert second.semantic_enriched_event_count == 0
+    assert len(second.recent_mapped_event_sample) == 1
+    assert second.recent_mapped_event_sample[0].event_id == mapped.event_id
     assert extractor.calls == 1
     assert authoritative.count() == 0
 

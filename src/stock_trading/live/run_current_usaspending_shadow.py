@@ -211,6 +211,31 @@ class UsaSpendingTransactionDiagnostic:
     match_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class UsaSpendingMappedEventDiagnostic:
+    event_id: str
+    company_id: str
+    modeled_company_name: str
+    recipient_name: str
+    award_id: str
+    transaction_id: str
+    action_date: str
+    public_time: datetime
+    modification_number: str
+    obligation_amount: str
+    total_obligation: str
+    potential_award_amount: str
+    agency: str
+    subagency: str
+    action_type: str
+    description: str
+    semantic_topics: tuple[str, ...]
+    semantic_direction: str
+    semantic_importance: float | None
+    semantic_company_relevance: float | None
+    semantic_confidence: float | None
+
+
 USASPENDING_DIAGNOSTIC_LIMIT = 10
 
 
@@ -231,6 +256,7 @@ class UsaSpendingShadowPollResult:
     unmatched_transaction_count: int
     transaction_diagnostic_sample: tuple[UsaSpendingTransactionDiagnostic, ...]
     mapped_event_count: int
+    recent_mapped_event_sample: tuple[UsaSpendingMappedEventDiagnostic, ...]
     semantic_enriched_event_count: int
     recovered_event_count: int
     pending_events_added: int
@@ -560,6 +586,10 @@ def poll_current_usaspending_shadow(
     commit_events = tuple(enriched_events) + tuple(recovered_events)
     pending_added = intake.commit_poll(watermark=cutoff, events=commit_events)
     final_state = intake.load()
+    recent_mapped_event_sample = _recent_mapped_event_sample(
+        known_events.values(),
+        name_index=name_index,
+    )
     return UsaSpendingShadowPollResult(
         award_pages_fetched=award_pages,
         awards_seen=awards_seen,
@@ -576,6 +606,7 @@ def poll_current_usaspending_shadow(
         unmatched_transaction_count=unmatched_transactions,
         transaction_diagnostic_sample=tuple(transaction_sample),
         mapped_event_count=len(enriched_events) + len(recovered_events),
+        recent_mapped_event_sample=recent_mapped_event_sample,
         semantic_enriched_event_count=len(enriched_events),
         recovered_event_count=len(recovered_events),
         pending_events_added=pending_added,
@@ -1056,6 +1087,83 @@ def _unique_name_company(
         return None
     matches = name_index.get(normalize_company_name(value), ())
     return matches[0] if len(matches) == 1 else None
+
+
+def _recent_mapped_event_sample(
+    events: Iterable[Event],
+    *,
+    name_index: dict[str, tuple[str, ...]],
+    limit: int = USASPENDING_DIAGNOSTIC_LIMIT,
+) -> tuple[UsaSpendingMappedEventDiagnostic, ...]:
+    if limit <= 0:
+        return ()
+    eligible = [
+        event
+        for event in events
+        if event.source is Source.USASPENDING
+        and event.event_type is EventType.GOVERNMENT_CONTRACT
+        and event.company_id
+        and event.semantic is not None
+    ]
+    eligible.sort(
+        key=lambda event: (event.public_time, event.event_time, event.event_id),
+        reverse=True,
+    )
+    diagnostics: list[UsaSpendingMappedEventDiagnostic] = []
+    for event in eligible[:limit]:
+        payload = event.payload
+        semantic = event.semantic
+        assert semantic is not None
+        diagnostics.append(
+            UsaSpendingMappedEventDiagnostic(
+                event_id=event.event_id,
+                company_id=event.company_id or '',
+                modeled_company_name=_modeled_company_display_name(
+                    event.company_id or '',
+                    name_index,
+                ),
+                recipient_name=str(payload.recipient_name or ''),
+                award_id=str(payload.award_id or ''),
+                transaction_id=str(payload.transaction_id or ''),
+                action_date=event.event_time.date().isoformat(),
+                public_time=event.public_time,
+                modification_number=str(payload.modification_number or ''),
+                obligation_amount=_diagnostic_decimal(payload.obligation_amount),
+                total_obligation=_diagnostic_decimal(payload.total_obligation),
+                potential_award_amount=_diagnostic_decimal(payload.potential_award_amount),
+                agency=str(payload.agency or ''),
+                subagency=str(payload.subagency or ''),
+                action_type=str(payload.action_type or ''),
+                description=_diagnostic_description(payload.description),
+                semantic_topics=tuple(semantic.topics),
+                semantic_direction=semantic.direction.value,
+                semantic_importance=float(semantic.importance),
+                semantic_company_relevance=float(semantic.company_relevance),
+                semantic_confidence=float(semantic.confidence),
+            )
+        )
+    return tuple(diagnostics)
+
+
+def _modeled_company_display_name(
+    company_id: str,
+    name_index: dict[str, tuple[str, ...]],
+) -> str:
+    names = [name for name, matches in name_index.items() if company_id in matches]
+    if not names:
+        return company_id
+    return min(names, key=lambda name: (len(name), name))
+
+
+def _diagnostic_decimal(value) -> str:
+    return '' if value is None else str(value)
+
+
+def _diagnostic_description(value, *, limit: int = 240) -> str:
+    text = str(value or '').strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + '...'
 
 
 def _transaction_search_rows_for_award(

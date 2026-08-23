@@ -53,3 +53,49 @@ jobs:
           python -W error -m stock_trading.live.run_current_lda_shadow --help
           python -W error -m stock_trading.live.run_current_usaspending_shadow --help
           python -W error -m stock_trading.live.refresh_forward_outcomes --help
+
+  usaspending-live-contract-probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: python -m pip install -e .
+      - name: Probe current contract search and detail endpoints
+        run: |
+          python - <<'PY'
+          import json
+          from datetime import date
+          from stock_trading.contracts import UsaSpendingClient
+
+          with UsaSpendingClient() as client:
+              raw = client.search_contract_awards_page(
+                  modified_after=date(2026, 8, 22),
+                  modified_before=date(2026, 8, 23),
+                  page=1,
+                  limit=5,
+              )
+              payload = json.loads(raw.content)
+              results = payload.get("results") or []
+              assert results, "live USAspending contract search returned no rows"
+              row = results[0]
+              print("award_search_keys=", sorted(row))
+              award_id = str(row["Award ID"])
+              generated = str(row["generated_internal_id"])
+              detail = client.fetch_award(generated)
+              detail_payload = json.loads(detail.content)
+              assert detail_payload.get("generated_unique_award_id") == generated
+              tx = client.search_contract_transactions_page(
+                  award_id,
+                  modified_after=date(2026, 8, 22),
+                  modified_before=date(2026, 8, 23),
+                  page=1,
+                  limit=5,
+              )
+              tx_payload = json.loads(tx.content)
+              assert isinstance(tx_payload.get("results"), list)
+              print("award_id=", award_id)
+              print("transaction_rows=", len(tx_payload["results"]))
+          PY

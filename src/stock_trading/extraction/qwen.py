@@ -11,6 +11,10 @@ from stock_trading.core import SemanticAnnotation
 from .semantic import ALLOWED_TOPICS, SemanticResult
 
 
+DEFAULT_QWEN_BASE_URL = "http://127.0.0.1:11434/v1"
+DEFAULT_QWEN_MODEL = "qwen3.5:4b-q8_0"
+
+
 class FileSemanticCache:
     """Content-addressed immutable cache for validated semantic results."""
 
@@ -52,8 +56,8 @@ class QwenSemanticExtractor:
         self,
         *,
         cache: FileSemanticCache,
-        base_url: str = "http://127.0.0.1:8000/v1",
-        model: str = "Qwen/Qwen3.5-4B",
+        base_url: str = DEFAULT_QWEN_BASE_URL,
+        model: str = DEFAULT_QWEN_MODEL,
         extractor_version: str = "semantic-v1",
         timeout_seconds: float = 120.0,
         client: httpx.Client | None = None,

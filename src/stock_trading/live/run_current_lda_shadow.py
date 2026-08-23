@@ -13,6 +13,7 @@ import httpx
 
 from stock_trading.core import Event, Source, as_utc
 from stock_trading.extraction import FileSemanticCache, QwenSemanticExtractor
+from stock_trading.extraction.qwen import DEFAULT_QWEN_BASE_URL, DEFAULT_QWEN_MODEL
 from stock_trading.lobbying import LdaClient, LdaFilingNormalizer
 from stock_trading.market import CandidateSnapshotBuilder, DuckDbMarketStore, TiingoClient, TiingoNormalizer
 from stock_trading.market import normalize_company_name
@@ -529,10 +530,10 @@ def _run_current_lda_shadow_locked(
     cutoff = as_utc(as_of or datetime.now(timezone.utc))
     shadow_root = runtime_root / "lda_shadow"
     resolved_qwen_url = (
-        qwen_base_url or os.environ.get("QWEN_BASE_URL", "http://127.0.0.1:8000/v1")
+        qwen_base_url or os.environ.get("QWEN_BASE_URL", DEFAULT_QWEN_BASE_URL)
     ).strip()
     resolved_qwen_model = (
-        qwen_model or os.environ.get("QWEN_MODEL", "Qwen/Qwen3.5-4B")
+        qwen_model or os.environ.get("QWEN_MODEL", DEFAULT_QWEN_MODEL)
     ).strip()
     token = (lda_api_token or os.environ.get("LDA_API_TOKEN", "")).strip() or None
 
@@ -1035,11 +1036,11 @@ def main() -> None:
     parser.add_argument("--as-of")
     parser.add_argument(
         "--qwen-base-url",
-        default=os.environ.get("QWEN_BASE_URL", "http://127.0.0.1:8000/v1"),
+        default=os.environ.get("QWEN_BASE_URL", DEFAULT_QWEN_BASE_URL),
     )
     parser.add_argument(
         "--qwen-model",
-        default=os.environ.get("QWEN_MODEL", "Qwen/Qwen3.5-4B"),
+        default=os.environ.get("QWEN_MODEL", DEFAULT_QWEN_MODEL),
     )
     args = parser.parse_args()
     result = run_current_lda_shadow(

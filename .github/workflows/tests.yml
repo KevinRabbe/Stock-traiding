@@ -50,6 +50,7 @@ jobs:
           python -W error -m stock_trading.experiments.v5_execution_filter_attribution --help
           python -W error -m stock_trading.experiments.v5_quality_row_attribution --help
           python -W error -m stock_trading.experiments.v5_horizon_quality_profit_proof --help
+          python -W error -m stock_trading.experiments.v5_edge_attribution --help
           python -W error -m stock_trading.live.verify_runtime --help
           python -W error -m stock_trading.live.poll_sec_form4 --help
           python -W error -m stock_trading.live.recover_sec_form4_quarantine --help

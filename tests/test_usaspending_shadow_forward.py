@@ -12,6 +12,7 @@ from stock_trading.core import RawRecord, SemanticAnnotation, SemanticDirection,
 from stock_trading.live.run_current_usaspending_shadow import (
     FileUsaSpendingShadowIntake,
     _matching_transaction_ids,
+    _transaction_action_freshness_reason,
     _transaction_search_rows_for_award,
     poll_current_usaspending_shadow,
 )
@@ -76,8 +77,14 @@ class _FakeExtractor:
 
 
 class _FakeUsaSpendingClient:
-    def __init__(self, *, award_has_next: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        award_has_next: bool = False,
+        transaction_action_date: str = "2026-08-22",
+    ) -> None:
         self.award_has_next = award_has_next
+        self.transaction_action_date = transaction_action_date
         self.award_search_calls = 0
         self.award_detail_calls = 0
         self.transaction_search_calls = 0
@@ -142,7 +149,7 @@ class _FakeUsaSpendingClient:
                         "Mod": "P00001",
                         "Recipient Name": "Microsoft Federal LLC",
                         "Recipient UEI": "CHILDUEI1234",
-                        "Action Date": "2026-08-22",
+                        "Action Date": self.transaction_action_date,
                         "Action Type": "FUNDING ONLY ACTION",
                         "Transaction Amount": 250000,
                         "Transaction Description": "Incremental cloud procurement funding",
@@ -164,7 +171,7 @@ class _FakeUsaSpendingClient:
                         "id": "CONT_TX_TEST_1",
                         "type": "D",
                         "type_description": "DEFINITIVE CONTRACT",
-                        "action_date": "2026-08-22",
+                        "action_date": self.transaction_action_date,
                         "action_type": "C",
                         "action_type_description": "FUNDING ONLY ACTION",
                         "modification_number": "P00001",
@@ -185,6 +192,24 @@ class _FakeUsaSpendingClient:
                 "page_metadata": {"page": 1, "hasNext": False},
             },
         )
+
+
+def test_transaction_action_freshness_rejects_old_database_updates() -> None:
+    row = {"Action Date": "2025-03-17"}
+    assert (
+        _transaction_action_freshness_reason(
+            row,
+            observed_on=date(2026, 8, 23),
+        )
+        == "stale_action_date"
+    )
+    assert (
+        _transaction_action_freshness_reason(
+            {"Action Date": "2026-08-22"},
+            observed_on=date(2026, 8, 23),
+        )
+        is None
+    )
 
 
 def test_transaction_search_rows_require_exact_generated_award_identity() -> None:
@@ -261,6 +286,35 @@ def test_contract_search_client_rejects_invalid_window() -> None:
         )
 
 
+def test_usaspending_shadow_filters_stale_last_modified_transaction_before_qwen(tmp_path) -> None:
+    pytest.importorskip("duckdb")
+    data_root = tmp_path / "data"
+    runtime_dir = data_root / "runtime"
+    experiment_dir = data_root / "experiments" / "model"
+    _seed_modeled_identity(data_root, experiment_dir)
+    extractor = _FakeExtractor()
+    client = _FakeUsaSpendingClient(transaction_action_date="2025-03-17")
+
+    result = poll_current_usaspending_shadow(
+        data_root=data_root,
+        experiment_dir=experiment_dir,
+        runtime_dir=runtime_dir,
+        usaspending_client=client,  # type: ignore[arg-type]
+        extractor=extractor,  # type: ignore[arg-type]
+        as_of=datetime(2026, 8, 23, 19, 0, tzinfo=UTC),
+    )
+
+    assert result.mapped_award_count == 1
+    assert result.transaction_search_row_count == 1
+    assert result.freshness_filtered_transaction_count == 1
+    assert result.matched_transaction_count == 0
+    assert result.mapped_event_count == 0
+    assert result.pending_events_added == 0
+    assert client.transaction_detail_calls == 0
+    assert extractor.calls == 0
+    assert result.transaction_diagnostic_sample[0].reason == "stale_action_date"
+
+
 def test_usaspending_shadow_maps_explicit_parent_and_isolated_qwen(tmp_path) -> None:
     pytest.importorskip("duckdb")
     data_root = tmp_path / "data"
@@ -285,6 +339,7 @@ def test_usaspending_shadow_maps_explicit_parent_and_isolated_qwen(tmp_path) -> 
     assert result.mapped_award_count == 1
     assert result.transaction_search_row_count == 1
     assert result.transaction_identity_filtered_row_count == 0
+    assert result.freshness_filtered_transaction_count == 0
     assert result.matched_transaction_count == 1
     assert result.unmatched_transaction_count == 0
     assert result.mapped_event_count == 1

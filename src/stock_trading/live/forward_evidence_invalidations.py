@@ -81,7 +81,10 @@ class FileForwardEvidenceInvalidationStore:
         for item in values:
             previous = existing.get(item.batch_id)
             if previous is not None:
-                if previous != item:
+                if (
+                    previous.evidence_source != item.evidence_source
+                    or previous.reason != item.reason
+                ):
                     raise ValueError(
                         f"forward evidence invalidation changed for {item.batch_id}"
                     )

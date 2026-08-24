@@ -24,6 +24,10 @@ from stock_trading.storage import DuckDbEventStore, FileRawStore
 from .candidates import PitCandidateAssembler
 from .current_cycle_receipt import batch_id
 from .decision_diagnostics import FileStrategyDecisionDiagnosticStore, diagnose_registry
+from .forward_evidence_invalidations import (
+    FileForwardEvidenceInvalidationStore,
+    ForwardEvidenceInvalidation,
+)
 from .forward_outcomes import refresh_forward_outcome_scorecard
 from .run_current_lda_shadow import (
     _atomic_json_write,
@@ -237,6 +241,8 @@ class UsaSpendingMappedEventDiagnostic:
 
 
 USASPENDING_DIAGNOSTIC_LIMIT = 10
+USASPENDING_MAX_ACTION_LAG_DAYS = 30
+USASPENDING_FRESHNESS_MIGRATION_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,6 +258,7 @@ class UsaSpendingShadowPollResult:
     transaction_detail_pages_fetched: int
     transaction_search_row_count: int
     transaction_identity_filtered_row_count: int
+    freshness_filtered_transaction_count: int
     matched_transaction_count: int
     unmatched_transaction_count: int
     transaction_diagnostic_sample: tuple[UsaSpendingTransactionDiagnostic, ...]
@@ -324,7 +331,12 @@ def poll_current_usaspending_shadow(
 
     raw_store = FileRawStore(shadow_root / "raw")
     event_store = DuckDbEventStore(shadow_root / "events.duckdb")
-    known_events = {event.event_id: event for event in event_store.all_events()}
+    invalidated_event_ids = _load_usaspending_freshness_invalidated_event_ids(shadow_root)
+    known_events = {
+        event.event_id: event
+        for event in event_store.all_events()
+        if event.event_id not in invalidated_event_ids
+    }
     pending_ids = {item.event_id for item in state.pending}
     handled_ids = set(state.handled_event_ids)
     normalizer = UsaSpendingNormalizer()
@@ -340,6 +352,7 @@ def poll_current_usaspending_shadow(
     transaction_detail_pages = 0
     transaction_search_rows = 0
     transaction_identity_filtered_rows = 0
+    freshness_filtered_transactions = 0
     matched_transactions = 0
     unmatched_transactions = 0
     transaction_sample: list[UsaSpendingTransactionDiagnostic] = []
@@ -464,7 +477,24 @@ def poll_current_usaspending_shadow(
                     typed_tx_results,
                     generated_award_id,
                 )
-                changed_rows.extend(accepted_rows)
+                fresh_rows: list[dict] = []
+                for accepted in accepted_rows:
+                    freshness_reason = _transaction_action_freshness_reason(
+                        accepted,
+                        observed_on=cutoff.date(),
+                    )
+                    if freshness_reason is None:
+                        fresh_rows.append(accepted)
+                    else:
+                        freshness_filtered_transactions += 1
+                        _append_transaction_diagnostic(
+                            transaction_sample,
+                            award_search_id,
+                            accepted,
+                            freshness_reason,
+                            0,
+                        )
+                changed_rows.extend(fresh_rows)
                 transaction_search_rows += len(typed_tx_results)
                 transaction_identity_filtered_rows += len(filtered_rows)
                 for filtered in filtered_rows:
@@ -602,6 +632,7 @@ def poll_current_usaspending_shadow(
         transaction_detail_pages_fetched=transaction_detail_pages,
         transaction_search_row_count=transaction_search_rows,
         transaction_identity_filtered_row_count=transaction_identity_filtered_rows,
+        freshness_filtered_transaction_count=freshness_filtered_transactions,
         matched_transaction_count=matched_transactions,
         unmatched_transaction_count=unmatched_transactions,
         transaction_diagnostic_sample=tuple(transaction_sample),
@@ -712,6 +743,10 @@ def _run_current_usaspending_shadow_locked(
     market_store = DuckDbMarketStore(Path(str(config["market_db"])))
     market_store.enable_read_cache(max_series=32)
     intake = FileUsaSpendingShadowIntake(shadow_root / "intake.json")
+    freshness_reconciliation = _reconcile_usaspending_action_freshness_v1(
+        runtime_root,
+        cutoff=cutoff,
+    )
 
     try:
         with UsaSpendingClient() as client, QwenSemanticExtractor(
@@ -743,6 +778,12 @@ def _run_current_usaspending_shadow_locked(
         "authority": "shadow_only_no_paper",
         "evidence_source": "usaspending_shadow",
         "qwen_model": resolved_qwen_model,
+        "freshness_policy": {
+            "max_action_lag_days": USASPENDING_MAX_ACTION_LAG_DAYS,
+            "discovery_date_type": "last_modified_date",
+            "economic_date_type": "action_date",
+        },
+        "freshness_reconciliation": freshness_reconciliation,
         "poll": _jsonable(asdict(poll)),
         "selection": {
             "target_execution_date": selection.target_execution_date.isoformat(),
@@ -830,12 +871,22 @@ def _run_current_usaspending_shadow_locked(
         data_root / "normalized" / "events.duckdb"
     ).all_events(company_ids=list(ready_set))
     histories: list[Iterable[Event]] = [authoritative_events]
+    invalidated_usaspending_event_ids = _load_usaspending_freshness_invalidated_event_ids(
+        shadow_root
+    )
     for path in (
         runtime_root / "lda_shadow" / "events.duckdb",
         shadow_root / "events.duckdb",
     ):
         if path.exists():
-            histories.append(DuckDbEventStore(path).all_events(company_ids=list(ready_set)))
+            history_events = DuckDbEventStore(path).all_events(company_ids=list(ready_set))
+            if path == shadow_root / "events.duckdb":
+                history_events = tuple(
+                    event
+                    for event in history_events
+                    if event.event_id not in invalidated_usaspending_event_ids
+                )
+            histories.append(history_events)
     all_events = _merge_event_history(*histories)
     assembly = PitCandidateAssembler(
         CandidateSnapshotBuilder(
@@ -1164,6 +1215,130 @@ def _diagnostic_description(value, *, limit: int = 240) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 3)].rstrip() + '...'
+
+
+def _transaction_action_freshness_reason(
+    row: dict,
+    *,
+    observed_on: date,
+    max_action_lag_days: int = USASPENDING_MAX_ACTION_LAG_DAYS,
+) -> str | None:
+    if max_action_lag_days < 0:
+        raise ValueError("max_action_lag_days must be >= 0")
+    text = str(row.get("Action Date") or "").strip()[:10]
+    try:
+        action_date = date.fromisoformat(text)
+    except ValueError:
+        return "invalid_action_date"
+    lag_days = (observed_on - action_date).days
+    if lag_days < 0:
+        return "future_action_date"
+    if lag_days > max_action_lag_days:
+        return "stale_action_date"
+    return None
+
+
+def _load_usaspending_freshness_migration(shadow_root: Path) -> dict | None:
+    path = shadow_root / "action_freshness_v1.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid USAspending action freshness migration: {path}") from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != USASPENDING_FRESHNESS_MIGRATION_SCHEMA_VERSION
+    ):
+        raise ValueError("unsupported USAspending action freshness migration schema")
+    event_ids = payload.get("invalidated_event_ids")
+    batch_ids = payload.get("invalidated_forward_batch_ids")
+    if not isinstance(event_ids, list) or not isinstance(batch_ids, list):
+        raise ValueError("invalid USAspending action freshness migration payload")
+    return payload
+
+
+def _load_usaspending_freshness_invalidated_event_ids(shadow_root: Path) -> frozenset[str]:
+    payload = _load_usaspending_freshness_migration(shadow_root)
+    if payload is None:
+        return frozenset()
+    return frozenset(str(item) for item in payload["invalidated_event_ids"])
+
+
+def _reconcile_usaspending_action_freshness_v1(
+    runtime_root: Path,
+    *,
+    cutoff: datetime,
+) -> dict:
+    shadow_root = runtime_root / "usaspending_shadow"
+    existing = _load_usaspending_freshness_migration(shadow_root)
+    if existing is not None:
+        return {
+            "applied_now": False,
+            "invalidated_stored_event_count": len(existing["invalidated_event_ids"]),
+            "invalidated_forward_batch_count": len(existing["invalidated_forward_batch_ids"]),
+            "invalidated_event_ids": list(existing["invalidated_event_ids"]),
+            "invalidated_forward_batch_ids": list(existing["invalidated_forward_batch_ids"]),
+        }
+
+    event_path = shadow_root / "events.duckdb"
+    stale_events: list[Event] = []
+    if event_path.exists():
+        for event in DuckDbEventStore(event_path).all_events():
+            if event.source is not Source.USASPENDING:
+                continue
+            lag_days = (event.public_time.date() - event.event_time.date()).days
+            if lag_days > USASPENDING_MAX_ACTION_LAG_DAYS:
+                stale_events.append(event)
+    invalidated_event_ids = tuple(sorted(event.event_id for event in stale_events))
+
+    invalidated_forward_batch_ids: tuple[str, ...] = ()
+    if invalidated_event_ids:
+        diagnostic_root = runtime_root / "decision_diagnostics"
+        invalidations: list[ForwardEvidenceInvalidation] = []
+        for path in sorted(diagnostic_root.glob("batch_*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ValueError(f"invalid forward decision diagnostic: {path}") from exc
+            if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+                raise ValueError(f"unsupported forward decision diagnostic: {path}")
+            if str(payload.get("evidence_source") or "").strip() != "usaspending_shadow":
+                continue
+            batch = str(payload.get("batch_id") or "")
+            if batch != path.stem:
+                raise ValueError(f"forward diagnostic batch identity mismatch: {path}")
+            invalidations.append(
+                ForwardEvidenceInvalidation(
+                    batch_id=batch,
+                    evidence_source="usaspending_shadow",
+                    reason="usaspending_pre_action_freshness_guard_v1",
+                    invalidated_at=cutoff,
+                )
+            )
+        FileForwardEvidenceInvalidationStore(
+            runtime_root / "forward_evidence_invalidations.json"
+        ).add_many(tuple(invalidations))
+        invalidated_forward_batch_ids = tuple(sorted(item.batch_id for item in invalidations))
+        FileUsaSpendingShadowIntake(shadow_root / "intake.json").dispose_stale(
+            invalidated_event_ids
+        )
+
+    migration_payload = {
+        "schema_version": USASPENDING_FRESHNESS_MIGRATION_SCHEMA_VERSION,
+        "migrated_at": cutoff.isoformat(),
+        "max_action_lag_days": USASPENDING_MAX_ACTION_LAG_DAYS,
+        "invalidated_event_ids": list(invalidated_event_ids),
+        "invalidated_forward_batch_ids": list(invalidated_forward_batch_ids),
+    }
+    _atomic_json_write(shadow_root / "action_freshness_v1.json", migration_payload)
+    return {
+        "applied_now": True,
+        "invalidated_stored_event_count": len(invalidated_event_ids),
+        "invalidated_forward_batch_count": len(invalidated_forward_batch_ids),
+        "invalidated_event_ids": list(invalidated_event_ids),
+        "invalidated_forward_batch_ids": list(invalidated_forward_batch_ids),
+    }
 
 
 def _transaction_search_rows_for_award(

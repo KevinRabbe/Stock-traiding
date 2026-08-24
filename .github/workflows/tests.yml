@@ -53,3 +53,28 @@ jobs:
           python -W error -m stock_trading.live.run_current_lda_shadow --help
           python -W error -m stock_trading.live.run_current_usaspending_shadow --help
           python -W error -m stock_trading.live.refresh_forward_outcomes --help
+
+  apply-usaspending-action-freshness:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/agent/usaspending-action-freshness' && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/usaspending-action-freshness
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Apply patch and remove temporary scaffolding
+        run: |
+          python .github/apply_usaspending_freshness.py
+          git checkout origin/main -- .github/workflows/tests.yml
+          rm -f .github/apply_usaspending_freshness.py
+          rm -f .github/workflows/apply-usaspending-action-freshness.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Guard USAspending action freshness and invalidate stale evidence"
+          git push origin HEAD:agent/usaspending-action-freshness

@@ -45,6 +45,7 @@ jobs:
           python -W error -m stock_trading.experiments.lightgbm_strategy_freeze_executable_maturity_compat --help
           python -W error -m stock_trading.experiments.freeze_v5_runtime_plugin --help
           python -W error -m stock_trading.experiments.v5_profit_proof --help
+          python -W error -m stock_trading.experiments.v5_profit_attribution --help
           python -W error -m stock_trading.live.verify_runtime --help
           python -W error -m stock_trading.live.poll_sec_form4 --help
           python -W error -m stock_trading.live.recover_sec_form4_quarantine --help

@@ -276,7 +276,12 @@ def _attribute_retrain_break(scenarios: list[dict[str, Any]]) -> dict[str, Any]:
         "annual_reset_to_continuous_portfolio",
     )
     steps: list[dict[str, Any]] = []
-    for step_name, previous, current in zip(step_names, scenarios, scenarios[1:], strict=True):
+    for step_name, previous, current in zip(
+        step_names,
+        scenarios[:-1],
+        scenarios[1:],
+        strict=True,
+    ):
         previous_alpha = previous.get("average_trade_alpha")
         current_alpha = current.get("average_trade_alpha")
         alpha_delta = (

@@ -17,6 +17,7 @@ from stock_trading.market import (
 )
 from stock_trading.storage import FileRawStore
 
+from .forward_evidence_invalidations import FileForwardEvidenceInvalidationStore
 from .run_current_paper_shadow import _load_runtime_config
 from .session_calendar import XnysExecutionSessionResolver
 
@@ -78,7 +79,19 @@ def refresh_forward_outcome_scorecard(
     market_store = DuckDbMarketStore(Path(str(config["market_db"])))
     market_store.enable_read_cache(max_series=64)
 
-    instances = _load_forward_decision_instances(runtime_dir / "decision_diagnostics")
+    diagnostic_root = runtime_dir / "decision_diagnostics"
+    invalidated_batch_ids = FileForwardEvidenceInvalidationStore(
+        runtime_dir / "forward_evidence_invalidations.json"
+    ).invalidated_batch_ids()
+    invalidated_diagnostic_batch_count = sum(
+        1
+        for path in diagnostic_root.glob("batch_*.json")
+        if path.stem in invalidated_batch_ids
+    )
+    instances = _load_forward_decision_instances(
+        diagnostic_root,
+        invalidated_batch_ids=invalidated_batch_ids,
+    )
     tracked_securities = sorted(
         {
             (item.security_id, _ticker_for_security(market_store, item.security_id, completed_session))
@@ -188,6 +201,7 @@ def refresh_forward_outcome_scorecard(
         "last_completed_xnys_session": completed_session.isoformat(),
         "summary": {
             "diagnostic_batch_count": len({item.batch_id for item in instances}),
+            "invalidated_diagnostic_batch_count": invalidated_diagnostic_batch_count,
             "candidate_decision_instance_count": len(instances),
             "strategy_decision_count": strategy_decision_count,
             "emitted_strategy_decision_count": emitted_strategy_decisions,
@@ -218,12 +232,18 @@ def refresh_forward_outcome_scorecard(
     }
 
 
-def _load_forward_decision_instances(root: Path) -> tuple[ForwardDecisionInstance, ...]:
+def _load_forward_decision_instances(
+    root: Path,
+    *,
+    invalidated_batch_ids: frozenset[str] = frozenset(),
+) -> tuple[ForwardDecisionInstance, ...]:
     if not root.exists():
         return ()
 
     result: list[ForwardDecisionInstance] = []
     for path in sorted(root.glob("batch_*.json")):
+        if path.stem in invalidated_batch_ids:
+            continue
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:

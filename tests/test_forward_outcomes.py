@@ -4,6 +4,10 @@ from decimal import Decimal
 
 import pytest
 
+from stock_trading.live.forward_evidence_invalidations import (
+    FileForwardEvidenceInvalidationStore,
+    ForwardEvidenceInvalidation,
+)
 from stock_trading.live.forward_outcomes import refresh_forward_outcome_scorecard
 from stock_trading.market import DuckDbMarketStore, MarketBar
 
@@ -215,3 +219,49 @@ def test_forward_scorecard_keeps_same_candidate_id_from_two_batches_distinct(tmp
         f"batch_one:{candidate_id}",
         f"batch_two:{candidate_id}",
     }
+
+
+
+def test_forward_scorecard_excludes_invalidated_diagnostic_batch(tmp_path) -> None:
+    runtime_dir = tmp_path / "runtime"
+    market_db = tmp_path / "market.duckdb"
+    runtime_dir.mkdir()
+    (runtime_dir / "paper_runtime.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "market_db": str(market_db),
+                "benchmark_security_id": "sec_spy",
+                "paper_ledger": str(runtime_dir / "paper_ledger.json"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    _seed_market(market_db)
+    candidate_id = "opportunity:cmp_test:2026-08-19"
+    _write_diagnostic(runtime_dir, "batch_one", candidate_id)
+    _write_diagnostic(runtime_dir, "batch_two", candidate_id)
+    FileForwardEvidenceInvalidationStore(
+        runtime_dir / "forward_evidence_invalidations.json"
+    ).add_many(
+        (
+            ForwardEvidenceInvalidation(
+                batch_id="batch_one",
+                evidence_source="usaspending_shadow",
+                reason="source_data_correction",
+                invalidated_at=datetime(2026, 8, 24, 1, 0, tzinfo=UTC),
+            ),
+        )
+    )
+
+    result = refresh_forward_outcome_scorecard(
+        data_root=tmp_path / "data",
+        runtime_dir=runtime_dir,
+        as_of=datetime(2026, 8, 25, 21, 0, tzinfo=UTC),
+    )
+
+    assert result["diagnostic_batch_count"] == 1
+    assert result["invalidated_diagnostic_batch_count"] == 1
+    assert result["candidate_decision_instance_count"] == 1
+    scorecard = json.loads((runtime_dir / "forward_scorecard.json").read_text(encoding="utf-8"))
+    assert [item["batch_id"] for item in scorecard["observations"]] == ["batch_two"]

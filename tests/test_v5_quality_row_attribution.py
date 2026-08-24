@@ -34,7 +34,10 @@ def test_walk_forward_roles_show_validation_then_training_influence() -> None:
 
     assert roles["evt_2013"]["validation_for_test_years"] == [2014]
     assert roles["evt_2013"]["train_for_test_years"] == [2015]
-    assert roles["evt_2013"]["test_years"] == [2013]
+    # The 2013 split itself is not valid in this tiny fixture because there is
+    # no pre-2012 training history. Role tracing deliberately reports only
+    # walk-forward splits that the evaluator would actually run.
+    assert roles["evt_2013"]["test_years"] == []
 
 
 def test_scorecard_delta_reports_direction_and_trade_change() -> None:

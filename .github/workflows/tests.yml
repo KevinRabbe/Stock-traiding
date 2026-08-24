@@ -69,8 +69,10 @@ jobs:
           python-version: "3.11"
       - name: Apply patch and remove temporary scaffolding
         run: |
+          python .github/fix_usaspending_helper_ambiguity.py
           python .github/apply_usaspending_freshness.py
           git checkout origin/main -- .github/workflows/tests.yml
+          rm -f .github/fix_usaspending_helper_ambiguity.py
           rm -f .github/apply_usaspending_freshness.py
           rm -f .github/workflows/apply-usaspending-action-freshness.yml
           git config user.name "github-actions[bot]"

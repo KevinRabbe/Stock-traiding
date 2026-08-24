@@ -55,7 +55,7 @@ jobs:
           python -W error -m stock_trading.live.refresh_forward_outcomes --help
 
   apply-usaspending-action-freshness:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/agent/usaspending-action-freshness' && github.actor != 'github-actions[bot]'
+    if: (github.event_name == 'pull_request' && github.head_ref == 'agent/usaspending-action-freshness') || (github.event_name == 'push' && github.ref == 'refs/heads/agent/usaspending-action-freshness' && github.actor != 'github-actions[bot]')
     runs-on: ubuntu-latest
     permissions:
       contents: write

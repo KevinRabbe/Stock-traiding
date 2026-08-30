@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from math import inf, isfinite, isnan
+from math import isfinite, isnan
 from typing import Mapping, Sequence
 
 
@@ -192,11 +192,27 @@ class StrategyArena:
             raise ValueError("strategy arena received duplicate strategy_id values")
 
         previous = dict(previous_states or {})
-        fitness = _composite_fitness(materialized)
+        eligibility = {
+            observation.strategy_id: _active_eligible(
+                observation,
+                market_state,
+                self.policy,
+            )
+            for observation in materialized
+        }
+        # Fitness is relative only to strategies that clear the survival gate.
+        # Adding hundreds of weak experiments must not change active allocations.
+        fitness = _composite_fitness(
+            tuple(
+                observation
+                for observation in materialized
+                if eligibility[observation.strategy_id]
+            )
+        )
         states: list[ArenaStrategyState] = []
         for observation in materialized:
             prior = previous.get(observation.strategy_id, StrategyLifecycle.EXPERIMENTAL)
-            eligible = _active_eligible(observation, market_state, self.policy)
+            eligible = eligibility[observation.strategy_id]
             lifecycle = _next_lifecycle(
                 prior,
                 observation,

@@ -194,6 +194,73 @@ def test_allocator_caps_each_strategy_and_preserves_total_risk_reserve() -> None
     assert "strategy-4" in allocated_ids
 
 
+def test_weak_experimental_population_cannot_distort_active_allocations() -> None:
+    policy = ArenaPolicy(
+        max_active_strategies=3,
+        max_strategy_weight=0.40,
+        max_total_weight=0.80,
+    )
+    arena = StrategyArena(policy)
+    strong = (
+        _observation(
+            "strong-a",
+            expectancy=0.006,
+            recent_expectancy=0.005,
+            profit_factor=1.60,
+            max_drawdown=0.015,
+            regime_similarity=0.90,
+            stability=0.90,
+        ),
+        _observation(
+            "strong-b",
+            expectancy=0.003,
+            recent_expectancy=0.002,
+            profit_factor=1.20,
+            max_drawdown=0.035,
+            regime_similarity=0.70,
+            stability=0.70,
+        ),
+    )
+    previous = {
+        "strong-a": StrategyLifecycle.SHADOW,
+        "strong-b": StrategyLifecycle.SHADOW,
+    }
+    baseline = arena.evaluate(_market(), strong, previous_states=previous)
+    baseline_weights = {
+        item.strategy_id: item.weight
+        for item in baseline.allocations
+    }
+
+    weak = tuple(
+        _observation(
+            f"weak-{index}",
+            trade_count=10,
+            expectancy=-0.01 - index * 0.001,
+            recent_expectancy=-0.02,
+            profit_factor=0.50,
+            max_drawdown=0.15,
+            regime_similarity=0.10,
+            stability=0.20,
+        )
+        for index in range(100)
+    )
+    expanded = arena.evaluate(
+        _market(),
+        strong + weak,
+        previous_states=previous,
+    )
+    expanded_weights = {
+        item.strategy_id: item.weight
+        for item in expanded.allocations
+    }
+
+    assert expanded_weights == pytest.approx(baseline_weights)
+    assert all(
+        _lifecycle(expanded, item.strategy_id) is StrategyLifecycle.EXPERIMENTAL
+        for item in weak
+    )
+
+
 def test_arena_rejects_duplicate_strategy_identity() -> None:
     arena = StrategyArena()
 
